@@ -22,7 +22,7 @@ jobs:
 
     - name: Run agent
       env:
-        GSHEETS_CREDS: ${{ secrets.PORTFOLIO_GS_CREDS }}
+        PORTFOLIO_GS_CREDS: ${{ secrets.PORTFOLIO_GS_CREDS }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python main.py
