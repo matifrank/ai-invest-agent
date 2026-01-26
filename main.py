@@ -26,8 +26,18 @@ def get_portfolio(sheet):
     return ws.get_all_records()
 
 def get_price(ticker):
-    data = yf.Ticker(ticker).history(period="1d")
-    return float(data["Close"].iloc[-1])
+    try:
+        data = yf.download(ticker, period="1d", interval="1d", progress=False)
+
+        if data.empty:
+            print(f"⚠️ No data for {ticker}")
+            return None
+
+        return float(data["Close"].iloc[-1])
+
+    except Exception as e:
+        print(f"❌ Error fetching {ticker}: {e}")
+        return None
 
 def save_price(sheet, ticker, price):
     ws = sheet.worksheet("prices_daily")
@@ -54,6 +64,10 @@ def main():
     for p in portfolio:
         ticker = p["ticker"]
         price = get_price(ticker)
+        
+        if price is None:
+            continue
+    
         prices[ticker] = price
         save_price(sheet, ticker, price)
 
