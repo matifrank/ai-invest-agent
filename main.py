@@ -55,11 +55,12 @@ def compute_value(portfolio, prices):
 
     for p in portfolio:
         try:
-            qty_raw = p.get("cantidad", "").strip()
-            if qty_raw == "":
+            raw_qty = p.get("cantidad", None)
+
+            if raw_qty is None or raw_qty == "":
                 continue
 
-            qty = float(qty_raw)
+            qty = float(raw_qty)
             ticker = p["ticker"]
 
             if ticker not in prices:
@@ -73,12 +74,26 @@ def compute_value(portfolio, prices):
 
     return total
 
-def send_telegram(msg):
-    token = os.environ["TELEGRAM_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.post(url, json={"chat_id": chat_id, "text": msg})
+def send_telegram(text):
+    try:
+        token = os.environ["TELEGRAM_TOKEN"]
+        chat_id = os.environ["TELEGRAM_CHAT_ID"]
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text
+        }
+
+        r = requests.post(url, json=payload, timeout=10)
+
+        print("📨 Telegram status:", r.status_code)
+        print("📨 Telegram response:", r.text)
+
+    except Exception as e:
+        print("❌ Telegram error:", e)
+
 
 def main():
     sheet = connect_sheets()
