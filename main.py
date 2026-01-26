@@ -29,24 +29,48 @@ def get_price(ticker):
     try:
         data = yf.download(ticker, period="1d", interval="1d", progress=False)
 
-        if data.empty:
-            print(f"⚠️ No data for {ticker}")
+        if data is None or data.empty or "Close" not in data:
+            print(f"⚠️ Ticker inválido o sin datos: {ticker}")
             return None
 
-        return float(data["Close"].iloc[-1])
+        price_series = data["Close"].dropna()
+
+        if price_series.empty:
+            print(f"⚠️ Sin precio válido para: {ticker}")
+            return None
+
+        return float(price_series.iloc[-1].item())
 
     except Exception as e:
-        print(f"❌ Error fetching {ticker}: {e}")
+        print(f"❌ Error obteniendo {ticker}: {e}")
         return None
+
 
 def save_price(sheet, ticker, price):
     ws = sheet.worksheet("prices_daily")
     ws.append_row([str(date.today()), ticker, price])
 
 def compute_value(portfolio, prices):
-    total = 0
+    total = 0.0
+
     for p in portfolio:
-        total += float(p["cantidad"]) * prices[p["ticker"]]
+        try:
+            qty_raw = p.get("cantidad", "").strip()
+            if qty_raw == "":
+                continue
+
+            qty = float(qty_raw)
+            ticker = p["ticker"]
+
+            if ticker not in prices:
+                continue
+
+            total += qty * prices[ticker]
+
+        except Exception as e:
+            print(f"⚠️ Skipping row {p}: {e}")
+            continue
+
     return total
 
 def send_telegram(msg):
