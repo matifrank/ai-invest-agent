@@ -13,22 +13,23 @@ from typing import Optional, Dict, Any, List, Tuple
 # =========================
 SPREADSHEET_NAME = "ai-portfolio-agent"
 
-PORTFOLIO_SHEET = "portfolio"
-WATCHLIST_SHEET = "watchlist"
-PRICES_SHEET = "prices_daily"
+PORTFOLIO_SHEET = "portfolio"              # ticker | tipo | cantidad | ppc | last_price | ratio
+WATCHLIST_SHEET = "watchlist"              # ticker | tipo | ratio
+PRICES_SHEET = "prices_daily"              # date | ticker | price | source
 
-# Use NEW sheets to avoid old headers messing columns
 PORTFOLIO_HISTORY_SHEET = "portfolio_history_v2"
 WATCHLIST_HISTORY_SHEET = "watchlist_history_v2"
 
+# Portfolio valuation mode (broker-like)
 PORTFOLIO_PRICE_MODE = "mark"  # mark | bid | ask | last
 
-BROKER_FEE_PCT = 0.5
-WATCH_MIN_DIFF_PCT = 1.5
-WATCH_MIN_NET_USD_PER_CEDEAR = 0.05
+# Costs and thresholds
+BROKER_FEE_PCT = 0.5  # per transaction
+WATCH_MIN_DIFF_PCT = 1.5  # % threshold vs market CCL
+WATCH_MIN_NET_USD_PER_CEDEAR = 0.05  # USD/CEDEAR after estimated fees
 
 IOL_BASE = "https://api.invertironline.com"
-IOL_MERCADO = "bcba"
+IOL_MERCADO = "bcba"  # CEDEARs/acciones locales
 
 # =========================
 # SHEETS
@@ -52,18 +53,12 @@ def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 40, header
 
     if header:
         values = ws.get_all_values()
-
         if not values:
             ws.append_row(header)
         else:
-            # Si hay algo, aseguramos que la fila 1 sea el header esperado.
-            # No creamos tabs nuevas.
+            # Ensure row 1 is the expected header; do NOT create new tabs.
             if values[0] != header:
-                # Opción A (recomendada): sobrescribir la fila 1 con el header esperado
                 ws.update("1:1", [header])
-
-                # Si querés ser más estricto y evitar headers duplicados,
-                # no insertamos filas: solo pisamos la primera.
     return ws
 
 def get_all_records(sheet, tab_name: str) -> List[Dict[str, Any]]:
@@ -127,7 +122,11 @@ class IOLClient:
     def login_password(self):
         r = requests.post(
             f"{IOL_BASE}/token",
-            data={"username": self.username, "password": self.password, "grant_type": "password"},
+            data={
+                "username": self.username,
+                "password": self.password,
+                "grant_type": "password",
+            },
             timeout=15,
         )
         r.raise_for_status()
@@ -223,22 +222,59 @@ def gain_usd(qty: float, ppc_ars: float, current_ars: float, ccl_impl: float) ->
         return 0.0
     return qty * (current_ars - ppc_ars) / ccl_impl
 
-def edge_gross(cedear_ars: float, ccl_mkt: float, ccl_impl: float) -> Optional[float]:
-    if not ccl_mkt or ccl_mkt <= 0 or not ccl_impl or ccl_impl <= 0:
+def usd_per_cedear(price_ars: float, ccl_mkt: float) -> Optional[float]:
+    if not price_ars or not ccl_mkt or ccl_mkt <= 0:
         return None
-    usd_mkt = cedear_ars / ccl_mkt
-    usd_impl = cedear_ars / ccl_impl
-    return usd_impl - usd_mkt
+    return price_ars / ccl_mkt
 
-def edge_net_abs(cedear_ars: float, ccl_mkt: float, ccl_impl: float, fee_pct_per_tx: float) -> Optional[Tuple[float, float, float]]:
-    g = edge_gross(cedear_ars, ccl_mkt, ccl_impl)
-    if g is None:
+def usd_stock_per_cedear(stock_usd: float, ratio: float) -> Optional[float]:
+    if not stock_usd or not ratio or ratio <= 0:
         return None
-    usd_mkt = cedear_ars / ccl_mkt
-    fee_usd = usd_mkt * ((2 * fee_pct_per_tx) / 100.0)
-    gross_abs = abs(g)
-    net = max(gross_abs - fee_usd, 0.0)
-    return gross_abs, fee_usd, net
+    return stock_usd / ratio
+
+def fee_roundtrip_usd(usd_base: float, fee_pct_per_tx: float) -> Optional[float]:
+    if usd_base is None:
+        return None
+    return usd_base * ((2 * fee_pct_per_tx) / 100.0)
+
+def edges_intuitive(
+    bid_ars: float, ask_ars: float, stock_usd: float, ratio: float, ccl_mkt: float, fee_pct_per_tx: float
+) -> Optional[Dict[str, float]]:
+    """
+    Intuitive edges (USD/CEDEAR):
+      usd_cedear_ask = ask_ars / ccl_mkt
+      usd_cedear_bid = bid_ars / ccl_mkt
+      usd_stock_per_cedear = stock_usd / ratio
+
+      BUY edge (cheap CEDEAR):  usd_stock_per_cedear - usd_cedear_ask
+      SELL edge (expensive CEDEAR): usd_cedear_bid - usd_stock_per_cedear
+    """
+    usd_ask = usd_per_cedear(ask_ars, ccl_mkt)
+    usd_bid = usd_per_cedear(bid_ars, ccl_mkt)
+    usd_stock = usd_stock_per_cedear(stock_usd, ratio)
+    if usd_ask is None or usd_bid is None or usd_stock is None:
+        return None
+
+    edge_buy_gross = usd_stock - usd_ask
+    edge_sell_gross = usd_bid - usd_stock
+
+    fee_buy = fee_roundtrip_usd(usd_ask, fee_pct_per_tx) or 0.0
+    fee_sell = fee_roundtrip_usd(usd_bid, fee_pct_per_tx) or 0.0
+
+    edge_buy_net = edge_buy_gross - fee_buy
+    edge_sell_net = edge_sell_gross - fee_sell
+
+    return {
+        "usd_cedear_ask": usd_ask,
+        "usd_cedear_bid": usd_bid,
+        "usd_stock_per_cedear": usd_stock,
+        "edge_buy_gross": edge_buy_gross,
+        "edge_sell_gross": edge_sell_gross,
+        "fee_buy_usd_rt": fee_buy,
+        "fee_sell_usd_rt": fee_sell,
+        "edge_buy_net": edge_buy_net,
+        "edge_sell_net": edge_sell_net,
+    }
 
 # =========================
 # PRICE FETCHERS
@@ -248,10 +284,8 @@ def get_cedear_quote_ars(ticker: str, iol: Optional[IOLClient]) -> Tuple[Optiona
         q = iol.get_quote(IOL_MERCADO, ticker)
         if q:
             last, bid, ask = parse_iol_quote(q)
-            # consider valid if we got at least last or bid/ask
             if last is not None or bid is not None or ask is not None:
                 return last, bid, ask, "IOL"
-    # fallback
     y = yahoo_cedear_price_ars(ticker)
     return y, None, None, "YAHOO"
 
@@ -289,18 +323,25 @@ def main():
     ws_port_hist = ensure_worksheet(
         sheet,
         PORTFOLIO_HISTORY_SHEET,
-        header=["date", "ticker", "qty", "ppc_ars", "mark_ars", "bid_ars", "ask_ars",
-                "ratio", "stock_usd", "ccl_impl", "usd_value", "gain_usd", "source"],
+        header=[
+            "date", "ticker", "qty", "ppc_ars",
+            "mark_ars", "bid_ars", "ask_ars",
+            "ratio", "stock_usd", "ccl_impl",
+            "usd_value", "gain_usd", "source"
+        ],
     )
     ws_watch_hist = ensure_worksheet(
         sheet,
         WATCHLIST_HISTORY_SHEET,
-        header=["date", "ticker", "ratio", "stock_usd", "bid_ars", "ask_ars",
-                "ccl_buy", "ccl_sell", "ccl_mkt",
-                "diff_buy_pct", "diff_sell_pct",
-                "gross_buy_abs", "gross_sell_abs",
-                "fee_buy_usd_rt", "fee_sell_usd_rt",
-                "net_buy", "net_sell", "source"],
+        header=[
+            "date","ticker","ratio","stock_usd","bid_ars","ask_ars",
+            "ccl_buy","ccl_sell","ccl_mkt","diff_buy_pct","diff_sell_pct",
+            "usd_cedear_ask","usd_cedear_bid","usd_stock_per_cedear",
+            "edge_buy_gross","edge_sell_gross",
+            "fee_buy_usd_rt","fee_sell_usd_rt",
+            "edge_buy_net","edge_sell_net",
+            "source"
+        ],
     )
 
     portfolio = get_all_records(sheet, PORTFOLIO_SHEET)
@@ -308,7 +349,6 @@ def main():
     ccl_mkt = get_ccl_market()
     today = str(date.today())
 
-    # IMPORTANT: ensure secrets are passed in workflow
     iol = None
     if os.environ.get("IOL_USERNAME") and os.environ.get("IOL_PASSWORD"):
         iol = IOLClient(os.environ["IOL_USERNAME"], os.environ["IOL_PASSWORD"])
@@ -316,7 +356,7 @@ def main():
     # ---------- PORTFOLIO ----------
     total_ars = 0.0
     total_usd = 0.0
-    dist: Dict[str, Tuple[float, float, float]] = {}
+    dist: Dict[str, Tuple[float, float, float]] = {}  # usd_value, gain_usd, ccl_impl
 
     for p in portfolio:
         ticker = (p.get("ticker") or "").strip()
@@ -358,11 +398,13 @@ def main():
             mark if mark is not None else "",
             bid if bid is not None else "",
             ask if ask is not None else "",
-            ratio, stock_usd, ccl_impl_now, usd_val, gain, src
+            ratio, stock_usd, ccl_impl_now,
+            usd_val, gain, src
         ])
 
     # ---------- WATCHLIST ----------
     watch_opps: List[str] = []
+
     for w in watchlist:
         ticker = (w.get("ticker") or "").strip()
         tipo = (w.get("tipo") or "").upper().strip()
@@ -381,7 +423,7 @@ def main():
                 bid if bid is not None else "",
                 ask if ask is not None else "",
                 "", "", ccl_mkt if ccl_mkt else "",
-                "", "", "", "", "", "", "", "", src
+                "", "", "", "", "", "", "", "", "", "", src
             ])
             continue
 
@@ -393,34 +435,44 @@ def main():
         diff_buy = (ccl_buy - ccl_mkt) / ccl_mkt * 100
         diff_sell = (ccl_sell - ccl_mkt) / ccl_mkt * 100
 
-        buy_pack = edge_net_abs(ask, ccl_mkt, ccl_buy, BROKER_FEE_PCT)
-        sell_pack = edge_net_abs(bid, ccl_mkt, ccl_sell, BROKER_FEE_PCT)
+        pack = edges_intuitive(bid, ask, stock_usd, ratio, ccl_mkt, BROKER_FEE_PCT)
+        if not pack:
+            continue
 
-        gross_buy_abs, fee_buy, net_buy = buy_pack if buy_pack else (None, None, None)
-        gross_sell_abs, fee_sell, net_sell = sell_pack if sell_pack else (None, None, None)
+        usd_ask = pack["usd_cedear_ask"]
+        usd_bid = pack["usd_cedear_bid"]
+        usd_stock = pack["usd_stock_per_cedear"]
+        edge_buy_gross = pack["edge_buy_gross"]
+        edge_sell_gross = pack["edge_sell_gross"]
+        fee_buy = pack["fee_buy_usd_rt"]
+        fee_sell = pack["fee_sell_usd_rt"]
+        edge_buy_net = pack["edge_buy_net"]
+        edge_sell_net = pack["edge_sell_net"]
 
-        # BUY opp: diff_buy negative enough + net positive enough
-        if diff_buy <= -WATCH_MIN_DIFF_PCT and net_buy is not None and net_buy >= WATCH_MIN_NET_USD_PER_CEDEAR:
+        # BUY opportunity
+        if diff_buy <= -WATCH_MIN_DIFF_PCT and edge_buy_net >= WATCH_MIN_NET_USD_PER_CEDEAR:
             watch_opps.append(
-                f"⚡ {ticker} COMPRA (ASK) diff {diff_buy:+.1f}% | bruto {gross_buy_abs:.2f} | fees {fee_buy:.2f} | neto {net_buy:.2f} USD/CEDEAR"
+                f"⚡ {ticker} COMPRA (ASK) diff {diff_buy:+.1f}% | "
+                f"usd ask {usd_ask:.2f} vs stock {usd_stock:.2f} | "
+                f"bruto {edge_buy_gross:.2f} | fees {fee_buy:.2f} | neto {edge_buy_net:.2f} USD/CEDEAR"
             )
 
-        # SELL opp: diff_sell positive enough + net positive enough
-        if diff_sell >= WATCH_MIN_DIFF_PCT and net_sell is not None and net_sell >= WATCH_MIN_NET_USD_PER_CEDEAR:
+        # SELL opportunity
+        if diff_sell >= WATCH_MIN_DIFF_PCT and edge_sell_net >= WATCH_MIN_NET_USD_PER_CEDEAR:
             watch_opps.append(
-                f"⚡ {ticker} VENTA (BID) diff {diff_sell:+.1f}% | bruto {gross_sell_abs:.2f} | fees {fee_sell:.2f} | neto {net_sell:.2f} USD/CEDEAR"
+                f"⚡ {ticker} VENTA (BID) diff {diff_sell:+.1f}% | "
+                f"usd bid {usd_bid:.2f} vs stock {usd_stock:.2f} | "
+                f"bruto {edge_sell_gross:.2f} | fees {fee_sell:.2f} | neto {edge_sell_net:.2f} USD/CEDEAR"
             )
 
         ws_watch_hist.append_row([
             today, ticker, ratio, stock_usd, bid, ask,
             ccl_buy, ccl_sell, ccl_mkt,
             diff_buy, diff_sell,
-            gross_buy_abs if gross_buy_abs is not None else "",
-            gross_sell_abs if gross_sell_abs is not None else "",
-            fee_buy if fee_buy is not None else "",
-            fee_sell if fee_sell is not None else "",
-            net_buy if net_buy is not None else "",
-            net_sell if net_sell is not None else "",
+            usd_ask, usd_bid, usd_stock,
+            edge_buy_gross, edge_sell_gross,
+            fee_buy, fee_sell,
+            edge_buy_net, edge_sell_net,
             src
         ])
 
