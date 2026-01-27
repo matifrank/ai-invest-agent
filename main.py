@@ -121,10 +121,10 @@ def compute_stock_usd_value(qty, price_ars, ccl):
 
 
 def compute_cedear_ccl(price_ars, price_usd, ratio):
-    try:
-        return price_ars / (price_usd * ratio)
-    except:
-        return None
+    if price_usd <= 0:
+        return 0
+    return (price_ars * ratio) / price_usd
+
 
 
 # =========================
