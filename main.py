@@ -114,6 +114,18 @@ def compute_value_usd(value_ars, ccl):
         return None
     return value_ars / ccl
 
+def compute_cedear_ccl(price_ars, price_usd, ratio):
+    try:
+        return price_ars / (price_usd * ratio)
+    except:
+        return None
+
+
+def compute_asset_usd_value(qty, price_ars, ccl):
+    try:
+        return (qty * price_ars) / ccl
+    except:
+        return None
 
 # =========================
 # Telegram
@@ -144,6 +156,7 @@ def send_telegram(msg):
 # MAIN
 # =========================
 
+
 def main():
     print("🚀 Iniciando pipeline")
 
@@ -154,7 +167,6 @@ def main():
 
     for p in portfolio:
         ticker = p.get("ticker")
-
         if not ticker:
             continue
 
@@ -168,18 +180,74 @@ def main():
 
     value_ars = compute_value(portfolio, prices)
     ccl = get_ccl()
-    value_usd = compute_value_usd(value_ars, ccl)
 
+    asset_reports = []
+    alerts = []
+    total_usd_real = 0.0
+
+    for p in portfolio:
+        ticker = p.get("ticker")
+        tipo = p.get("tipo")
+        qty = safe_float(p.get("cantidad"))
+        ratio = safe_float(p.get("ratio")) or 1
+
+        if ticker not in prices or qty is None:
+            continue
+
+        price_ars = prices[ticker]
+
+        if tipo == "CEDEAR":
+            price_usd = get_price(ticker)
+
+            if not price_usd:
+                continue
+
+            ccl_impl = compute_cedear_ccl(price_ars, price_usd, ratio)
+            usd_value = compute_asset_usd_value(qty, price_ars, ccl_impl)
+
+            if ccl_impl and ccl:
+                diff = (ccl_impl - ccl) / ccl * 100
+                if abs(diff) > 6:
+                    alerts.append(f"💱 {ticker} desvío CCL {diff:+.1f}%")
+
+        else:
+            usd_value = compute_asset_usd_value(qty, price_ars, ccl)
+
+        if usd_value:
+            total_usd_real += usd_value
+            asset_reports.append({
+                "ticker": ticker,
+                "usd_value": usd_value
+            })
+
+    # Concentración
+    for a in asset_reports:
+        weight = a["usd_value"] / total_usd_real * 100
+        if weight > 35:
+            alerts.append(f"⚠️ Alta concentración: {a['ticker']} {weight:.1f}%")
+
+    # Mensaje
     msg = "📊 AI Portfolio Daily\n\n"
-    msg += f"Valor ARS: ${value_ars:,.2f}\n"
+    msg += f"Valor ARS: ${value_ars:,.0f}\n"
 
     if ccl:
-        msg += f"CCL: ${ccl:,.2f}\n"
+        msg += f"CCL mercado: ${ccl:,.0f}\n"
 
-    if value_usd:
-        msg += f"Valor USD: ${value_usd:,.2f}\n"
+    msg += f"Valor USD real: ${total_usd_real:,.2f}\n\n"
 
-    msg += "\nPipeline funcionando ✅"
+    msg += "Distribución principal:\n"
+
+    for a in sorted(asset_reports, key=lambda x: x["usd_value"], reverse=True)[:3]:
+        msg += f"- {a['ticker']}: ${a['usd_value']:.0f}\n"
+
+    if alerts:
+        msg += "\n🚨 Alertas:\n"
+        for al in alerts:
+            msg += f"{al}\n"
+    else:
+        msg += "\n✅ Sin alertas relevantes\n"
+
+    msg += "\nPipeline funcionando 🤖"
 
     send_telegram(msg)
 
