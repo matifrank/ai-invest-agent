@@ -133,7 +133,7 @@ def main():
     alerts = []
     watch_alerts = []
 
-    # ===== Portfolio =====
+    # ===== Portfolio real =====
     for p in portfolio:
         ticker = p.get("ticker")
         tipo = p.get("tipo", "").upper()
@@ -152,41 +152,20 @@ def main():
             update_last_price(sheet, ticker, price_ars)
             save_price(sheet, ticker, price_ars)
 
-            # Último precio subyacente USD
             stock_usd = get_stock_usd_price(ticker)
             if not stock_usd:
                 continue
 
-            # CCL implícito compra y actual
-            ccl_buy = compute_ccl_from_prices(ppc, stock_usd, ratio)
             ccl_now = compute_ccl_from_prices(price_ars, stock_usd, ratio)
 
-            # Valor USD real
             usd_value = compute_cedear_usd_value(qty, price_ars, ccl_now)
             gain_usd = compute_gain_loss_usd(qty, price_ars, ppc, ccl_now)
-            total_usd += usd_value
+
             total_ars += qty * price_ars
-            dist[ticker] = usd_value
+            total_usd += usd_value
+            dist[ticker] = (usd_value, ccl_now, gain_usd)
 
-            # Alertas de CCL y arbitraje
-            if ccl_buy and ccl_now:
-                diff = (ccl_now - ccl_buy) / ccl_buy * 100
-                if abs(diff) > 6:
-                    alerts.append(
-                        f"💱 {ticker} CCL propio {diff:+.1f}% "
-                        f"(compra {ccl_buy:.0f} → actual {ccl_now:.0f})"
-                    )
-                if diff > 6:
-                    alerts.append(
-                        f"⚡ {ticker} posible arbitraje: USD potencial {gain_usd:,.2f}"
-                    )
-            # Alertas ganancia/perdida vs PPC
-            if gain_usd != 0:
-                alerts.append(
-                    f"📈 {ticker} ganancia/perdida USD: {gain_usd:+,.2f}"
-                )
-
-    # ===== Watchlist =====
+    # ===== Watchlist oportunidades =====
     for w in watchlist:
         ticker = w.get("ticker")
         tipo = w.get("tipo", "").upper()
@@ -203,12 +182,11 @@ def main():
 
             ccl_impl = compute_ccl_from_prices(last_price_ars, stock_usd, ratio)
             diff_pct = (ccl_impl - ccl_market) / ccl_market * 100 if ccl_market else 0
-            if abs(diff_pct) > 6:
-                action = "compra" if diff_pct > 0 else "venta"
-                potential_usd = last_price_ars / ccl_impl
-                watch_alerts.append(
-                    f"⚡ {ticker} arbitraje {action} → USD potencial {potential_usd:,.2f}"
-                )
+            action = "compra" if diff_pct > 0 else "venta"
+            potential_usd = last_price_ars / ccl_impl
+            watch_alerts.append(
+                f"⚡ {ticker} arbitraje {action} → USD potencial {potential_usd:,.2f} (diff {diff_pct:+.1f}%)"
+            )
 
     # ===== Mensaje Telegram =====
     msg = (
@@ -218,18 +196,20 @@ def main():
         "Distribución principal:\n"
     )
 
-    for k, v in sorted(dist.items(), key=lambda x: -x[1])[:3]:
-        msg += f"- {k}: ${v:,.2f}\n"
+    for k, (usd_value, ccl_now, gain_usd) in sorted(dist.items(), key=lambda x: -x[1][0])[:3]:
+        msg += f"- {k}: ${usd_value:,.2f} ({gain_usd:+.2f} USD, CCL {ccl_now:.0f})\n"
 
-    if alerts:
-        msg += "\n🚨 Alertas cartera:\n" + "\n".join(alerts)
+    if dist:
+        msg += "\n🚨 Ganancia / pérdida cartera:\n"
+        for k, (usd_value, ccl_now, gain_usd) in sorted(dist.items(), key=lambda x: -x[1][0]):
+            msg += f"📈 {k}: {gain_usd:+.2f} USD\n" if gain_usd >=0 else f"📉 {k}: {gain_usd:+.2f} USD\n"
+
     if watch_alerts:
-        msg += "\n\n👀 Watchlist oportunidades:\n" + "\n".join(watch_alerts)
+        msg += "\n👀 Watchlist oportunidades:\n" + "\n".join(watch_alerts)
 
     msg += "\n\nPipeline funcionando 🤖"
 
     send_telegram(msg)
-
 
 if __name__ == "__main__":
     main()
