@@ -41,9 +41,10 @@ def update_last_price(sheet, ticker, price):
 # =========================
 
 def get_cedear_price(ticker):
+    """Último precio CEDEAR (en ARS)"""
     try:
         symbol = ticker + ".BA"
-        data = yf.download(symbol, period="1d", interval="1d", progress=False)
+        data = yf.download(symbol, period="1d", interval="5m", progress=False)
         if data is None or data.empty:
             return None
         return float(data["Close"].dropna().iloc[-1])
@@ -51,24 +52,14 @@ def get_cedear_price(ticker):
         return None
 
 def get_stock_usd_price(ticker):
+    """Último precio acción subyacente en USD"""
     try:
-        data = yf.download(ticker, period="1d", interval="1d", progress=False)
+        data = yf.download(ticker, period="1d", interval="5m", progress=False)
         if data is None or data.empty:
             return None
         return float(data["Close"].dropna().iloc[-1])
     except:
         return None
-
-def get_ccl_market():
-    try:
-        r = requests.get("https://dolarapi.com/v1/dolares", timeout=10)
-        data = r.json()
-        for item in data:
-            if item.get("casa") == "contadoconliqui":
-                return float(item["venta"])
-    except:
-        pass
-    return None
 
 # =========================
 # Finance
@@ -81,14 +72,16 @@ def safe_float(x):
         return None
 
 def compute_ccl_from_prices(cedear_ars, stock_usd, ratio):
-    if not stock_usd or not ratio:
+    """CCL implícito por cada CEDEAR"""
+    if not stock_usd or not ratio or not cedear_ars:
         return None
     return (cedear_ars * ratio) / stock_usd
 
-def compute_cedear_usd_value(qty, price_ars, ccl):
-    if not ccl:
+def compute_cedear_usd_value(qty, price_ars, ccl_implicit):
+    """Valor USD usando CCL implícito"""
+    if not ccl_implicit:
         return 0
-    return qty * price_ars / ccl
+    return qty * price_ars / ccl_implicit
 
 # =========================
 # Telegram
@@ -109,7 +102,6 @@ def main():
 
     sheet = connect_sheets()
     portfolio = get_portfolio(sheet)
-    ccl_market = get_ccl_market()
 
     total_ars = 0
     total_usd = 0
@@ -128,27 +120,29 @@ def main():
 
         if tipo == "CEDEAR":
 
+            # 1️⃣ Último precio CEDEAR en ARS
             price_ars = get_cedear_price(ticker)
             if not price_ars:
                 continue
-
             update_last_price(sheet, ticker, price_ars)
             save_price(sheet, ticker, price_ars)
 
+            # 2️⃣ Último precio subyacente en USD
             stock_usd = get_stock_usd_price(ticker)
             if not stock_usd:
                 continue
 
-            total_ars += qty * price_ars
-
+            # 3️⃣ CCL implícito de compra y actual
             ccl_buy = compute_ccl_from_prices(ppc, stock_usd, ratio)
             ccl_now = compute_ccl_from_prices(price_ars, stock_usd, ratio)
 
-            usd_value = compute_cedear_usd_value(qty, price_ars, ccl_market)
-
+            # 4️⃣ Valor USD real usando CCL implícito
+            usd_value = compute_cedear_usd_value(qty, price_ars, ccl_now)
             total_usd += usd_value
+            total_ars += qty * price_ars
             dist[ticker] = usd_value
 
+            # 5️⃣ Alertas por desviación CCL
             if ccl_buy and ccl_now:
                 diff = (ccl_now - ccl_buy) / ccl_buy * 100
                 if abs(diff) > 6:
@@ -158,10 +152,9 @@ def main():
                     )
 
     msg = (
-        "📊 AI Portfolio Daily\n\n"
+        "📊 AI Portfolio Daily - Broker Mode\n\n"
         f"Valor ARS: ${total_ars:,.0f}\n"
-        f"CCL mercado: ${ccl_market:,.0f}\n"
-        f"Valor USD real: ${total_usd:,.2f}\n\n"
+        f"Valor USD real (CCL implícito por activo): ${total_usd:,.2f}\n\n"
         "Distribución principal:\n"
     )
 
