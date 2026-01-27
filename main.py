@@ -52,9 +52,7 @@ def get_price(ticker):
             return None
 
         price_series = data["Close"].dropna()
-
         if price_series.empty:
-            print(f"⚠️ Sin precio válido para: {ticker}")
             return None
 
         return float(price_series.iloc[-1].item())
@@ -75,14 +73,13 @@ def get_ccl():
                 return float(item["venta"])
 
         return None
-
     except Exception as e:
         print("❌ Error obteniendo CCL:", e)
         return None
 
 
 # =========================
-# Helpers
+# Helpers financieros
 # =========================
 
 def safe_float(x):
@@ -94,9 +91,8 @@ def safe_float(x):
         return None
 
 
-def compute_value(portfolio, prices):
+def compute_portfolio_value_ars(portfolio, prices):
     total = 0.0
-
     for p in portfolio:
         qty = safe_float(p.get("cantidad"))
         ticker = p.get("ticker")
@@ -105,20 +101,7 @@ def compute_value(portfolio, prices):
             continue
 
         total += qty * prices[ticker]
-
     return total
-
-
-def compute_value_usd(value_ars, ccl):
-    if not ccl or ccl == 0:
-        return None
-    return value_ars / ccl
-
-def compute_cedear_ccl(price_ars, price_usd, ratio):
-    try:
-        return price_ars / (price_usd * ratio)
-    except:
-        return None
 
 
 def compute_cedear_usd_value(qty, price_ars, ratio, ccl):
@@ -126,6 +109,21 @@ def compute_cedear_usd_value(qty, price_ars, ratio, ccl):
         return (qty * price_ars / ratio) / ccl
     except:
         return None
+
+
+def compute_stock_usd_value(qty, price_ars, ccl):
+    try:
+        return (qty * price_ars) / ccl
+    except:
+        return None
+
+
+def compute_cedear_ccl(price_ars, price_usd, ratio):
+    try:
+        return price_ars / (price_usd * ratio)
+    except:
+        return None
+
 
 # =========================
 # Telegram
@@ -147,7 +145,6 @@ def send_telegram(msg):
         r = requests.post(url, json=payload, timeout=10)
         print("📨 Telegram status:", r.status_code)
         print("📨 Telegram response:", r.text)
-
     except Exception as e:
         print("❌ Error enviando Telegram:", e)
 
@@ -155,7 +152,6 @@ def send_telegram(msg):
 # =========================
 # MAIN
 # =========================
-
 
 def main():
     print("🚀 Iniciando pipeline")
@@ -171,14 +167,13 @@ def main():
             continue
 
         price = get_price(ticker)
-
         if price is None:
             continue
 
         prices[ticker] = price
         save_price(sheet, ticker, price)
 
-    value_ars = compute_value(portfolio, prices)
+    value_ars = compute_portfolio_value_ars(portfolio, prices)
     ccl = get_ccl()
 
     asset_reports = []
@@ -191,27 +186,25 @@ def main():
         qty = safe_float(p.get("cantidad"))
         ratio = safe_float(p.get("ratio")) or 1
 
-        if ticker not in prices or qty is None:
+        if ticker not in prices or qty is None or not ccl:
             continue
 
         price_ars = prices[ticker]
 
         if tipo == "CEDEAR":
             usd_value = compute_cedear_usd_value(qty, price_ars, ratio, ccl)
-            # arbitraje opcional usando Yahoo
-            price_usd = get_price(ticker)
 
+            # arbitraje opcional
+            price_usd = get_price(ticker)
             if price_usd:
                 ccl_impl = compute_cedear_ccl(price_ars, price_usd, ratio)
+                diff = (ccl_impl - ccl) / ccl * 100
 
-                if ccl_impl and ccl:
-                    diff = (ccl_impl - ccl) / ccl * 100
-                    if abs(diff) > 6:
-                        alerts.append(f"💱 {ticker} desvío CCL {diff:+.1f}%")
-
+                if abs(diff) > 6:
+                    alerts.append(f"💱 {ticker} desvío CCL {diff:+.1f}%")
 
         else:
-            usd_value = compute_asset_usd_value(qty, price_ars, ccl)
+            usd_value = compute_stock_usd_value(qty, price_ars, ccl)
 
         if usd_value:
             total_usd_real += usd_value
@@ -226,19 +219,15 @@ def main():
         if weight > 35:
             alerts.append(f"⚠️ Alta concentración: {a['ticker']} {weight:.1f}%")
 
-    # Mensaje
+    # Mensaje Telegram
     msg = "📊 AI Portfolio Daily\n\n"
     msg += f"Valor ARS: ${value_ars:,.0f}\n"
-
-    if ccl:
-        msg += f"CCL mercado: ${ccl:,.0f}\n"
-
+    msg += f"CCL mercado: ${ccl:,.0f}\n"
     msg += f"Valor USD real: ${total_usd_real:,.2f}\n\n"
 
     msg += "Distribución principal:\n"
-
     for a in sorted(asset_reports, key=lambda x: x["usd_value"], reverse=True)[:3]:
-        msg += f"- {a['ticker']}: ${a['usd_value']:.0f}\n"
+        msg += f"- {a['ticker']}: ${a['usd_value']:.2f}\n"
 
     if alerts:
         msg += "\n🚨 Alertas:\n"
