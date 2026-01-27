@@ -8,6 +8,8 @@ from datetime import date
 
 SPREADSHEET_NAME = "ai-portfolio-agent"
 
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # =========================
 # Google Sheets
@@ -100,7 +102,12 @@ def compute_value(portfolio, prices):
         qty = safe_float(p.get("cantidad"))
         ticker = p.get("ticker")
 
-        if qty is None or ticker not in prices:
+        if qty is None:
+            print(f"⚠️ Cantidad inválida para {ticker}")
+            continue
+
+        if ticker not in prices:
+            print(f"⚠️ Sin precio para {ticker}")
             continue
 
         total += qty * prices[ticker]
@@ -115,4 +122,24 @@ def compute_value_usd(value_ars, ccl):
 
 
 # =========================
-#
+# Telegram
+# =========================
+
+def send_telegram(msg):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ Telegram no configurado")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": msg
+    }
+
+    r = requests.post(url, json=payload, timeout=10)
+    print("📨 Telegram status:", r.status_code)
+    print("📨 Telegram response:", r.text)
+
+
+# ================
