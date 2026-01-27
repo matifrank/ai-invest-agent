@@ -74,7 +74,6 @@ def get_ccl():
             if item.get("casa") == "contadoconliqui":
                 return float(item["venta"])
 
-        print("⚠️ No se encontró CCL")
         return None
 
     except Exception as e:
@@ -83,7 +82,7 @@ def get_ccl():
 
 
 # =========================
-# Portfolio Logic
+# Helpers
 # =========================
 
 def safe_float(x):
@@ -102,12 +101,7 @@ def compute_value(portfolio, prices):
         qty = safe_float(p.get("cantidad"))
         ticker = p.get("ticker")
 
-        if qty is None:
-            print(f"⚠️ Cantidad inválida para {ticker}")
-            continue
-
-        if ticker not in prices:
-            print(f"⚠️ Sin precio para {ticker}")
+        if qty is None or ticker not in prices:
             continue
 
         total += qty * prices[ticker]
@@ -137,9 +131,58 @@ def send_telegram(msg):
         "text": msg
     }
 
-    r = requests.post(url, json=payload, timeout=10)
-    print("📨 Telegram status:", r.status_code)
-    print("📨 Telegram response:", r.text)
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        print("📨 Telegram status:", r.status_code)
+        print("📨 Telegram response:", r.text)
+
+    except Exception as e:
+        print("❌ Error enviando Telegram:", e)
 
 
-# ================
+# =========================
+# MAIN
+# =========================
+
+def main():
+    print("🚀 Iniciando pipeline")
+
+    sheet = connect_sheets()
+    portfolio = get_portfolio(sheet)
+
+    prices = {}
+
+    for p in portfolio:
+        ticker = p.get("ticker")
+
+        if not ticker:
+            continue
+
+        price = get_price(ticker)
+
+        if price is None:
+            continue
+
+        prices[ticker] = price
+        save_price(sheet, ticker, price)
+
+    value_ars = compute_value(portfolio, prices)
+    ccl = get_ccl()
+    value_usd = compute_value_usd(value_ars, ccl)
+
+    msg = "📊 AI Portfolio Daily\n\n"
+    msg += f"Valor ARS: ${value_ars:,.2f}\n"
+
+    if ccl:
+        msg += f"CCL: ${ccl:,.2f}\n"
+
+    if value_usd:
+        msg += f"Valor USD: ${value_usd:,.2f}\n"
+
+    msg += "\nPipeline funcionando ✅"
+
+    send_telegram(msg)
+
+
+if __name__ == "__main__":
+    main()
