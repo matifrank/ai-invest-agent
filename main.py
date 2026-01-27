@@ -121,9 +121,9 @@ def compute_cedear_ccl(price_ars, price_usd, ratio):
         return None
 
 
-def compute_asset_usd_value(qty, price_ars, ccl):
+def compute_cedear_usd_value(qty, price_ars, ratio, ccl):
     try:
-        return (qty * price_ars) / ccl
+        return (qty * price_ars / ratio) / ccl
     except:
         return None
 
@@ -197,18 +197,18 @@ def main():
         price_ars = prices[ticker]
 
         if tipo == "CEDEAR":
+            usd_value = compute_cedear_usd_value(qty, price_ars, ratio, ccl)
+            # arbitraje opcional usando Yahoo
             price_usd = get_price(ticker)
 
-            if not price_usd:
-                continue
+            if price_usd:
+                ccl_impl = compute_cedear_ccl(price_ars, price_usd, ratio)
 
-            ccl_impl = compute_cedear_ccl(price_ars, price_usd, ratio)
-            usd_value = compute_asset_usd_value(qty, price_ars, ccl_impl)
+                if ccl_impl and ccl:
+                    diff = (ccl_impl - ccl) / ccl * 100
+                    if abs(diff) > 6:
+                        alerts.append(f"💱 {ticker} desvío CCL {diff:+.1f}%")
 
-            if ccl_impl and ccl:
-                diff = (ccl_impl - ccl) / ccl * 100
-                if abs(diff) > 6:
-                    alerts.append(f"💱 {ticker} desvío CCL {diff:+.1f}%")
 
         else:
             usd_value = compute_asset_usd_value(qty, price_ars, ccl)
