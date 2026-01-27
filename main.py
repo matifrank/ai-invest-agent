@@ -104,11 +104,13 @@ def compute_portfolio_value_ars(portfolio, prices):
     return total
 
 
-def compute_cedear_usd_value(qty, price_ars, ratio, ccl):
-    try:
-        return (qty * price_ars / ratio) / ccl
-    except:
-        return None
+def compute_cedear_usd_value(qty, price_ars, ccl, ratio):
+    if ccl <= 0 or ratio <= 0:
+        return 0
+
+    shares = qty / ratio
+    price_usd = price_ars / ccl
+    return shares * price_usd
 
 
 def compute_stock_usd_value(qty, price_ars, ccl):
@@ -192,11 +194,11 @@ def main():
         price_ars = prices[ticker]
 
         if tipo == "CEDEAR":
-            usd_value = compute_cedear_usd_value(qty, price_ars, ratio, ccl)
+            usd_value = compute_cedear_usd_value(qty, price_ars, ccl, ratio)
 
             # arbitraje opcional
             price_usd = get_price(ticker)
-            if price_usd:
+            if price_usd is not None and price_usd > 0:
                 ccl_impl = compute_cedear_ccl(price_ars, price_usd, ratio)
                 diff = (ccl_impl - ccl) / ccl * 100
 
@@ -204,7 +206,7 @@ def main():
                     alerts.append(f"💱 {ticker} desvío CCL {diff:+.1f}%")
 
         else:
-            usd_value = compute_stock_usd_value(qty, price_ars, ccl)
+            usd_value = compute_stock_usd_value(qty, price_usd)
 
         if usd_value:
             total_usd_real += usd_value
