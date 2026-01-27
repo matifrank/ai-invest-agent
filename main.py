@@ -5,6 +5,8 @@ import yfinance as yf
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import date
+import requests
+from bs4 import BeautifulSoup
 
 SPREADSHEET_NAME = "ai-portfolio-agent"
 
@@ -50,6 +52,33 @@ def save_price(sheet, ticker, price):
     ws = sheet.worksheet("prices_daily")
     ws.append_row([str(date.today()), ticker, price])
 
+import requests
+from bs4 import BeautifulSoup
+
+def get_ccl():
+    try:
+        url = "https://www.acuantoesta.com.ar/cedears"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+
+        soup = BeautifulSoup(r.text, "lxml")
+
+        text = soup.get_text()
+
+        import re
+        match = re.search(r"CCL.*?\$([\d.,]+)", text)
+
+        if not match:
+            print("⚠️ No se pudo encontrar CCL")
+            return None
+
+        ccl = match.group(1).replace(".", "").replace(",", ".")
+        return float(ccl)
+
+    except Exception as e:
+        print("❌ Error obteniendo CCL:", e)
+        return None
+
 def compute_value(portfolio, prices):
     total = 0.0
 
@@ -73,6 +102,11 @@ def compute_value(portfolio, prices):
             continue
 
     return total
+
+def compute_value_usd(value_ars, ccl):
+    if ccl is None or ccl == 0:
+        return None
+    return value_ars / ccl
 
 
 def send_telegram(text):
@@ -110,16 +144,26 @@ def main():
         prices[ticker] = price
         save_price(sheet, ticker, price)
 
-    value = compute_value(portfolio, prices)
+    value_ars = compute_value(portfolio, prices)
+
+    ccl = get_ccl()
+    value_usd = compute_value_usd(value_ars, ccl)
 
     msg = (
         "📊 AI Portfolio Daily\n\n"
-        f"Valor cartera aprox: ${value:,.2f}\n"
-        f"Activos: {len(portfolio)}\n\n"
-        "Pipeline funcionando ✅"
+        f"Valor ARS: ${value_ars:,.0f}\n"
     )
 
+    if ccl:
+        msg += f"CCL: ${ccl:,.0f}\n"
+
+    if value_usd:
+        msg += f"Valor USD: ${value_usd:,.2f}\n"
+
+    msg += "\nPipeline funcionando ✅"
+
     send_telegram(msg)
+
 
 if __name__ == "__main__":
     main()
