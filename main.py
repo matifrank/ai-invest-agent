@@ -59,25 +59,32 @@ def get_ccl():
     try:
         url = "https://www.acuantoesta.com.ar/cedears"
         headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=10)
 
+        r = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(r.text, "lxml")
 
-        text = soup.get_text()
+        # Buscar tarjeta que contenga "Dólar CCL"
+        cards = soup.find_all("div")
 
-        import re
-        match = re.search(r"CCL.*?\$([\d.,]+)", text)
+        for div in cards:
+            txt = div.get_text(strip=True)
 
-        if not match:
-            print("⚠️ No se pudo encontrar CCL")
-            return None
+            if "CCL" in txt and "$" in txt:
+                import re
+                match = re.search(r"\$([\d\.]+,\d+|\d+)", txt)
 
-        ccl = match.group(1).replace(".", "").replace(",", ".")
-        return float(ccl)
+                if match:
+                    val = match.group(1)
+                    val = val.replace(".", "").replace(",", ".")
+                    return float(val)
+
+        print("⚠️ No se encontró CCL en la página")
+        return None
 
     except Exception as e:
         print("❌ Error obteniendo CCL:", e)
         return None
+
 
 def compute_value(portfolio, prices):
     total = 0.0
