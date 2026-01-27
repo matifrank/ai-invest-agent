@@ -31,6 +31,13 @@ def connect_sheets():
     return client.open(SPREADSHEET_NAME)
 
 
+def get_or_create_sheet(sheet, name, rows=1000, cols=20):
+    try:
+        return sheet.worksheet(name)
+    except gspread.exceptions.WorksheetNotFound:
+        return sheet.add_worksheet(title=name, rows=rows, cols=cols)
+
+
 def get_portfolio(sheet):
     ws = sheet.worksheet(PORTFOLIO_SHEET)
     return ws.get_all_records()
@@ -41,17 +48,11 @@ def save_price(sheet, ticker, price):
     ws.append_row([str(date.today()), ticker, price])
 
 
-def get_or_create_sheet(sheet, name, rows=1000, cols=20):
-    try:
-        return sheet.worksheet(name)
-    except gspread.exceptions.WorksheetNotFound:
-        return sheet.add_worksheet(title=name, rows=rows, cols=cols)
-
-
 # =========================
 # Market Data
 # =========================
 def get_price(ticker):
+    """Obtiene el último precio del ticker desde Yahoo Finance"""
     try:
         data = yf.download(ticker, period="1d", interval="1d", progress=False)
         if data is None or data.empty or "Close" not in data:
@@ -61,13 +62,14 @@ def get_price(ticker):
         if price_series.empty:
             print(f"⚠️ Sin precio válido para: {ticker}")
             return None
-        return float(price_series.iloc[-1].item())  # evita FutureWarning
+        return float(price_series.iloc[-1].item())
     except Exception as e:
         print(f"❌ Error obteniendo {ticker}: {e}")
         return None
 
 
 def get_ccl():
+    """Obtiene CCL actual"""
     try:
         url = "https://dolarapi.com/v1/dolares"
         r = requests.get(url, timeout=10)
@@ -107,6 +109,7 @@ def compute_stock_usd_value(qty, price_usd):
 
 
 def compute_cedear_ccl(price_ars, price_usd, ratio):
+    """CCL implícito por cada CEDEAR"""
     if not price_ars or not price_usd or not ratio:
         return 0
     return price_ars / (price_usd * ratio)
@@ -143,7 +146,7 @@ def main():
     total_ars = 0
     total_usd = 0
 
-    # Procesar cartera
+    # ===== Cartera =====
     for p in portfolio:
         ticker = p.get("ticker")
         tipo = p.get("tipo")
@@ -154,7 +157,6 @@ def main():
         last_price = get_price(ticker)
         if last_price is None:
             continue
-
         prices[ticker] = last_price
         save_price(sheet, ticker, last_price)
 
@@ -167,12 +169,13 @@ def main():
         total_usd += usd_value
 
         gain_usd = usd_value - (qty * ppc / (ratio if tipo == "CEDEAR" else 1))
-        portfolio_msg.append(f"- {ticker}: ${qty * last_price:,.2f} ({gain_usd:+.2f} USD, CCL {compute_cedear_ccl(last_price, last_price, ratio) if tipo=='CEDEAR' else 'N/A'})")
+        portfolio_msg.append(f"- {ticker}: ${qty*last_price:,.2f} ({gain_usd:+.2f} USD, CCL {compute_cedear_ccl(last_price, last_price, ratio) if tipo=='CEDEAR' else 'N/A'})")
 
-    # Procesar watchlist (solo oportunidades)
+    # ===== Watchlist =====
     ws_watchlist = sheet.worksheet(WATCHLIST_SHEET)
     watchlist_data = ws_watchlist.get_all_records()
     watchlist_msg = []
+
     for w in watchlist_data:
         ticker = w.get("ticker")
         tipo = w.get("tipo")
@@ -180,13 +183,17 @@ def main():
         price_ars = get_price(ticker)
         if price_ars is None:
             continue
-        price_usd = price_ars / ccl_market / ratio if tipo == "CEDEAR" else price_ars
-        diff_pct = (price_ars / price_usd / ratio - ccl_market) / ccl_market * 100 if tipo=="CEDEAR" else 0
-        if abs(diff_pct) > 0.5:  # solo reportar spreads interesantes
+
+        # CCL implícito por ticker
+        price_usd = price_ars / ccl_market / ratio if tipo=="CEDEAR" else price_ars
+        diff_pct = (price_ars / (price_usd * ratio) - ccl_market) / ccl_market * 100 if tipo=="CEDEAR" else 0
+
+        # Solo mostrar spreads interesantes
+        if abs(diff_pct) > 0.5:
             watchlist_msg.append(f"⚡ {ticker} arbitraje {'compra' if diff_pct>0 else 'venta'} → USD potencial {price_usd:.2f} (diff {diff_pct:+.1f}%)")
             ws_watch_hist.append_row([str(date.today()), ticker, price_ars, price_usd, ratio, ccl_market, diff_pct])
 
-    # Armar mensaje
+    # ===== Armar mensaje =====
     msg = (
         f"📊 AI Portfolio Daily - Broker Mode\n\n"
         f"Valor ARS: ${total_ars:,.0f}\n"
@@ -194,7 +201,7 @@ def main():
         f"Distribución principal:\n" +
         "\n".join(portfolio_msg) + "\n\n"
         f"🚨 Ganancia / pérdida cartera:\n" +
-        "\n".join([f"📈 {p.get('ticker')}: +{compute_cedear_usd_value(safe_float(p.get('cantidad')), get_price(p.get('ticker')), ccl_market, safe_float(p.get('ratio'))):.2f} USD" for p in portfolio]) + "\n\n"
+        "\n".join([f"📈 {p.get('ticker')}: {compute_cedear_usd_value(safe_float(p.get('cantidad')), get_price(p.get('ticker')), ccl_market, safe_float(p.get('ratio'))):+.2f} USD" for p in portfolio]) + "\n\n"
         f"👀 Watchlist oportunidades:\n" + "\n".join(watchlist_msg) + "\n\n"
         f"Pipeline funcionando 🤖"
     )
