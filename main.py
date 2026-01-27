@@ -10,6 +10,8 @@ SPREADSHEET_NAME = "ai-portfolio-agent"
 PORTFOLIO_SHEET = "portfolio"
 WATCHLIST_SHEET = "watchlist"
 PRICES_SHEET = "prices_daily"
+PORTFOLIO_HISTORY_SHEET = "portfolio_history"
+WATCHLIST_HISTORY_SHEET = "watchlist_history"
 
 # =========================
 # Google Sheets
@@ -47,7 +49,6 @@ def update_last_price(sheet, ticker, price):
 # =========================
 
 def get_cedear_price(ticker):
-    """Último precio CEDEAR (en ARS)"""
     try:
         symbol = ticker + ".BA"
         data = yf.download(symbol, period="1d", interval="5m", progress=False)
@@ -58,7 +59,6 @@ def get_cedear_price(ticker):
         return None
 
 def get_stock_usd_price(ticker):
-    """Último precio acción subyacente en USD"""
     try:
         data = yf.download(ticker, period="1d", interval="5m", progress=False)
         if data is None or data.empty:
@@ -68,7 +68,6 @@ def get_stock_usd_price(ticker):
         return None
 
 def get_ccl():
-    """CCL mercado (USD)"""
     try:
         url = "https://dolarapi.com/v1/dolares"
         r = requests.get(url, timeout=10)
@@ -130,8 +129,9 @@ def main():
     total_ars = 0
     total_usd = 0
     dist = {}
-    alerts = []
     watch_alerts = []
+
+    today_str = str(date.today())
 
     # ===== Portfolio real =====
     for p in portfolio:
@@ -145,7 +145,6 @@ def main():
             continue
 
         if tipo == "CEDEAR":
-            # Último precio CEDEAR y actualización sheet
             price_ars = get_cedear_price(ticker)
             if not price_ars:
                 continue
@@ -157,13 +156,12 @@ def main():
                 continue
 
             ccl_now = compute_ccl_from_prices(price_ars, stock_usd, ratio)
-
             usd_value = compute_cedear_usd_value(qty, price_ars, ccl_now)
             gain_usd = compute_gain_loss_usd(qty, price_ars, ppc, ccl_now)
 
             total_ars += qty * price_ars
             total_usd += usd_value
-            dist[ticker] = (usd_value, ccl_now, gain_usd)
+            dist[ticker] = (usd_value, ccl_now, gain_usd, price_ars)
 
     # ===== Watchlist oportunidades =====
     for w in watchlist:
@@ -171,48 +169,6 @@ def main():
         tipo = w.get("tipo", "").upper()
         ratio = safe_float(w.get("ratio"))
 
-        if not ticker:
-            continue
-
-        if tipo == "CEDEAR":
-            last_price_ars = get_cedear_price(ticker)
-            stock_usd = get_stock_usd_price(ticker)
-            if not last_price_ars or not stock_usd:
-                continue
-
-            ccl_impl = compute_ccl_from_prices(last_price_ars, stock_usd, ratio)
-            diff_pct = (ccl_impl - ccl_market) / ccl_market * 100 if ccl_market else 0
-            action = "compra" if diff_pct > 0 else "venta"
-            potential_usd = last_price_ars / ccl_impl
-            watch_alerts.append(
-                f"⚡ {ticker} arbitraje {action} → USD potencial {potential_usd:,.2f} (diff {diff_pct:+.1f}%)"
-            )
-    
-    # ===== Después de calcular portfolio =====
-    ws_portfolio_hist = sheet.worksheet("portfolio_history")
-    today_str = str(date.today())
-
-    for k, (usd_value, ccl_now, gain_usd) in dist.items():
-        p = next((x for x in portfolio if x["ticker"] == k), None)
-        if not p:
-            continue
-        qty = safe_float(p.get("cantidad"))
-        ppc = safe_float(p.get("ppc"))
-        last_price = safe_float(p.get("last_price")) or 0
-        ratio = safe_float(p.get("ratio")) or 0
-
-        # Guardar fila: fecha, ticker, qty, PPC, last_price, ratio, CCL implícito, USD value, ganancia/pérdida
-        ws_portfolio_hist.append_row([
-            today_str, k, qty, ppc, last_price, ratio, ccl_now, usd_value, gain_usd
-        ])
-
-    # ===== Después de calcular watchlist =====
-    ws_watch_hist = sheet.worksheet("watchlist_history")
-
-    for w in watchlist:
-        ticker = w.get("ticker")
-        tipo = w.get("tipo", "").upper()
-        ratio = safe_float(w.get("ratio"))
         if not ticker or tipo != "CEDEAR":
             continue
 
@@ -226,10 +182,28 @@ def main():
         action = "compra" if diff_pct > 0 else "venta"
         potential_usd = last_price_ars / ccl_impl if ccl_impl else 0
 
+        # Solo agregar si hay oportunidad real de ganancia
+        if potential_usd > 0:
+            watch_alerts.append(
+                f"⚡ {ticker} arbitraje {action} → USD potencial {potential_usd:,.2f} (diff {diff_pct:+.1f}%)"
+            )
+
+        # Guardar histórico watchlist
+        ws_watch_hist = sheet.worksheet(WATCHLIST_HISTORY_SHEET)
         ws_watch_hist.append_row([
             today_str, ticker, last_price_ars, stock_usd, ratio, ccl_impl, diff_pct, action, potential_usd
         ])
 
+    # ===== Guardar histórico portfolio =====
+    ws_portfolio_hist = sheet.worksheet(PORTFOLIO_HISTORY_SHEET)
+    for k, (usd_value, ccl_now, gain_usd, last_price) in dist.items():
+        p = next((x for x in portfolio if x["ticker"] == k), None)
+        qty = safe_float(p.get("cantidad"))
+        ppc = safe_float(p.get("ppc"))
+        ratio = safe_float(p.get("ratio"))
+        ws_portfolio_hist.append_row([
+            today_str, k, qty, ppc, last_price, ratio, ccl_now, usd_value, gain_usd
+        ])
 
     # ===== Mensaje Telegram =====
     msg = (
@@ -239,12 +213,12 @@ def main():
         "Distribución principal:\n"
     )
 
-    for k, (usd_value, ccl_now, gain_usd) in sorted(dist.items(), key=lambda x: -x[1][0])[:3]:
+    for k, (usd_value, ccl_now, gain_usd, _) in sorted(dist.items(), key=lambda x: -x[1][0])[:3]:
         msg += f"- {k}: ${usd_value:,.2f} ({gain_usd:+.2f} USD, CCL {ccl_now:.0f})\n"
 
     if dist:
         msg += "\n🚨 Ganancia / pérdida cartera:\n"
-        for k, (usd_value, ccl_now, gain_usd) in sorted(dist.items(), key=lambda x: -x[1][0]):
+        for k, (usd_value, ccl_now, gain_usd, _) in sorted(dist.items(), key=lambda x: -x[1][0]):
             msg += f"📈 {k}: {gain_usd:+.2f} USD\n" if gain_usd >=0 else f"📉 {k}: {gain_usd:+.2f} USD\n"
 
     if watch_alerts:
