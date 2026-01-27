@@ -187,6 +187,49 @@ def main():
             watch_alerts.append(
                 f"⚡ {ticker} arbitraje {action} → USD potencial {potential_usd:,.2f} (diff {diff_pct:+.1f}%)"
             )
+    
+    # ===== Después de calcular portfolio =====
+    ws_portfolio_hist = sheet.worksheet("portfolio_history")
+    today_str = str(date.today())
+
+    for k, (usd_value, ccl_now, gain_usd) in dist.items():
+        p = next((x for x in portfolio if x["ticker"] == k), None)
+        if not p:
+            continue
+        qty = safe_float(p.get("cantidad"))
+        ppc = safe_float(p.get("ppc"))
+        last_price = safe_float(p.get("last_price")) or 0
+        ratio = safe_float(p.get("ratio")) or 0
+
+        # Guardar fila: fecha, ticker, qty, PPC, last_price, ratio, CCL implícito, USD value, ganancia/pérdida
+        ws_portfolio_hist.append_row([
+            today_str, k, qty, ppc, last_price, ratio, ccl_now, usd_value, gain_usd
+        ])
+
+    # ===== Después de calcular watchlist =====
+    ws_watch_hist = sheet.worksheet("watchlist_history")
+
+    for w in watchlist:
+        ticker = w.get("ticker")
+        tipo = w.get("tipo", "").upper()
+        ratio = safe_float(w.get("ratio"))
+        if not ticker or tipo != "CEDEAR":
+            continue
+
+        last_price_ars = get_cedear_price(ticker)
+        stock_usd = get_stock_usd_price(ticker)
+        if not last_price_ars or not stock_usd:
+            continue
+
+        ccl_impl = compute_ccl_from_prices(last_price_ars, stock_usd, ratio)
+        diff_pct = (ccl_impl - ccl_market) / ccl_market * 100 if ccl_market else 0
+        action = "compra" if diff_pct > 0 else "venta"
+        potential_usd = last_price_ars / ccl_impl if ccl_impl else 0
+
+        ws_watch_hist.append_row([
+            today_str, ticker, last_price_ars, stock_usd, ratio, ccl_impl, diff_pct, action, potential_usd
+        ])
+
 
     # ===== Mensaje Telegram =====
     msg = (
