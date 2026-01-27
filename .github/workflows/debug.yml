@@ -25,4 +25,4 @@ jobs:
           IOL_USERNAME: ${{ secrets.IOL_USERNAME }}
           IOL_PASSWORD: ${{ secrets.IOL_PASSWORD }}
         run: |
-          python debug_iol_quote.py
+          python request_api.py
