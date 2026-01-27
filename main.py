@@ -8,9 +8,6 @@ from datetime import date
 
 SPREADSHEET_NAME = "ai-portfolio-agent"
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-
 # =========================
 # Google Sheets
 # =========================
@@ -20,137 +17,91 @@ def connect_sheets():
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive"
     ]
-
     creds_json = os.environ["PORTFOLIO_GS_CREDS"]
     creds_dict = json.loads(creds_json)
-
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
     return client.open(SPREADSHEET_NAME)
 
-
 def get_portfolio(sheet):
-    ws = sheet.worksheet("portfolio")
-    return ws.get_all_records()
-
+    return sheet.worksheet("portfolio").get_all_records()
 
 def save_price(sheet, ticker, price):
     ws = sheet.worksheet("prices_daily")
     ws.append_row([str(date.today()), ticker, price])
 
+def update_last_price(sheet, ticker, price):
+    ws = sheet.worksheet("portfolio")
+    cells = ws.findall(ticker)
+    for c in cells:
+        ws.update_cell(c.row, 5, price)
 
 # =========================
 # Market Data
 # =========================
 
-def get_price(ticker):
+def get_cedear_price(ticker):
     try:
-        data = yf.download(ticker, period="1d", interval="1d", progress=False)
-
-        if data is None or data.empty or "Close" not in data:
-            print(f"⚠️ Ticker inválido o sin datos: {ticker}")
+        symbol = ticker + ".BA"
+        data = yf.download(symbol, period="1d", interval="1d", progress=False)
+        if data is None or data.empty:
             return None
-
-        price_series = data["Close"].dropna()
-        if price_series.empty:
-            return None
-
-        return float(price_series.iloc[-1].item())
-
-    except Exception as e:
-        print(f"❌ Error obteniendo {ticker}: {e}")
+        return float(data["Close"].dropna().iloc[-1])
+    except:
         return None
 
-
-def get_ccl():
+def get_stock_usd_price(ticker):
     try:
-        url = "https://dolarapi.com/v1/dolares"
-        r = requests.get(url, timeout=10)
-        data = r.json()
+        data = yf.download(ticker, period="1d", interval="1d", progress=False)
+        if data is None or data.empty:
+            return None
+        return float(data["Close"].dropna().iloc[-1])
+    except:
+        return None
 
+def get_ccl_market():
+    try:
+        r = requests.get("https://dolarapi.com/v1/dolares", timeout=10)
+        data = r.json()
         for item in data:
             if item.get("casa") == "contadoconliqui":
                 return float(item["venta"])
-
-        return None
-    except Exception as e:
-        print("❌ Error obteniendo CCL:", e)
-        return None
-
+    except:
+        pass
+    return None
 
 # =========================
-# Helpers financieros
+# Finance
 # =========================
 
 def safe_float(x):
     try:
-        if x is None or x == "":
-            return None
         return float(x)
     except:
         return None
 
-
-def compute_portfolio_value_ars(portfolio, prices):
-    total = 0.0
-    for p in portfolio:
-        qty = safe_float(p.get("cantidad"))
-        ticker = p.get("ticker")
-
-        if qty is None or ticker not in prices:
-            continue
-
-        total += qty * prices[ticker]
-    return total
-
-
-def compute_cedear_usd_value(qty, price_ars, ccl, ratio):
-    if ccl <= 0 or ratio <= 0:
-        return 0
-
-    shares = qty / ratio
-    price_usd = price_ars / ccl
-    return shares * price_usd
-
+def compute_ccl_from_prices(cedear_ars, stock_usd, ratio):
+    if not stock_usd or not ratio:
+        return None
+    return (cedear_ars * ratio) / stock_usd
 
 def compute_cedear_usd_value(qty, price_ars, ccl):
-    if ccl <= 0:
+    if not ccl:
         return 0
     return qty * price_ars / ccl
-
-def compute_cedear_ccl(price_ars, price_usd, ratio):
-    if price_usd <= 0:
-        return 0
-    return (price_ars * ratio) / price_usd
-
-
 
 # =========================
 # Telegram
 # =========================
 
 def send_telegram(msg):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ Telegram no configurado")
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": msg
-    }
-
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        print("📨 Telegram status:", r.status_code)
-        print("📨 Telegram response:", r.text)
-    except Exception as e:
-        print("❌ Error enviando Telegram:", e)
-
+    token = os.environ["TELEGRAM_TOKEN"]
+    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    requests.post(url, json={"chat_id": chat_id, "text": msg})
 
 # =========================
-# MAIN
+# Main
 # =========================
 
 def main():
@@ -158,86 +109,71 @@ def main():
 
     sheet = connect_sheets()
     portfolio = get_portfolio(sheet)
+    ccl_market = get_ccl_market()
 
-    prices = {}
-
-    for p in portfolio:
-        ticker = p.get("ticker")
-        if not ticker:
-            continue
-
-        price = get_price(ticker)
-        if price is None:
-            continue
-
-        prices[ticker] = price
-        save_price(sheet, ticker, price)
-
-    value_ars = compute_portfolio_value_ars(portfolio, prices)
-    ccl = get_ccl()
-
-    asset_reports = []
+    total_ars = 0
+    total_usd = 0
+    dist = {}
     alerts = []
-    total_usd_real = 0.0
 
     for p in portfolio:
         ticker = p.get("ticker")
-        tipo = p.get("tipo")
+        tipo = p.get("tipo", "").upper()
         qty = safe_float(p.get("cantidad"))
-        ratio = safe_float(p.get("ratio")) or 1
+        ppc = safe_float(p.get("ppc"))
+        ratio = safe_float(p.get("ratio"))
 
-        if ticker not in prices or qty is None or not ccl:
+        if not ticker or not qty:
             continue
-
-        price_ars = prices[ticker]
 
         if tipo == "CEDEAR":
-            usd_value = compute_cedear_usd_value(qty, price_ars, ccl)
-            price_usd = get_price(ticker)
-            if price_usd and ratio:
-                ccl_impl = compute_cedear_ccl(price_ars, price_usd, ratio)
-                diff = (ccl_impl - ccl) / ccl * 100
 
+            price_ars = get_cedear_price(ticker)
+            if not price_ars:
+                continue
+
+            update_last_price(sheet, ticker, price_ars)
+            save_price(sheet, ticker, price_ars)
+
+            stock_usd = get_stock_usd_price(ticker)
+            if not stock_usd:
+                continue
+
+            total_ars += qty * price_ars
+
+            ccl_buy = compute_ccl_from_prices(ppc, stock_usd, ratio)
+            ccl_now = compute_ccl_from_prices(price_ars, stock_usd, ratio)
+
+            usd_value = compute_cedear_usd_value(qty, price_ars, ccl_market)
+
+            total_usd += usd_value
+            dist[ticker] = usd_value
+
+            if ccl_buy and ccl_now:
+                diff = (ccl_now - ccl_buy) / ccl_buy * 100
                 if abs(diff) > 6:
-                    alerts.append(f"💱 {ticker} desvío CCL {diff:+.1f}%")
+                    alerts.append(
+                        f"💱 {ticker} CCL propio {diff:+.1f}% "
+                        f"(compra {ccl_buy:.0f} → actual {ccl_now:.0f})"
+                    )
 
-        else:
-            usd_value = compute_stock_usd_value(qty, price_usd)
+    msg = (
+        "📊 AI Portfolio Daily\n\n"
+        f"Valor ARS: ${total_ars:,.0f}\n"
+        f"CCL mercado: ${ccl_market:,.0f}\n"
+        f"Valor USD real: ${total_usd:,.2f}\n\n"
+        "Distribución principal:\n"
+    )
 
-        if usd_value:
-            total_usd_real += usd_value
-            asset_reports.append({
-                "ticker": ticker,
-                "usd_value": usd_value
-            })
-
-    # Concentración
-    for a in asset_reports:
-        weight = a["usd_value"] / total_usd_real * 100
-        if weight > 35:
-            alerts.append(f"⚠️ Alta concentración: {a['ticker']} {weight:.1f}%")
-
-    # Mensaje Telegram
-    msg = "📊 AI Portfolio Daily\n\n"
-    msg += f"Valor ARS: ${value_ars:,.0f}\n"
-    msg += f"CCL mercado: ${ccl:,.0f}\n"
-    msg += f"Valor USD real: ${total_usd_real:,.2f}\n\n"
-
-    msg += "Distribución principal:\n"
-    for a in sorted(asset_reports, key=lambda x: x["usd_value"], reverse=True)[:3]:
-        msg += f"- {a['ticker']}: ${a['usd_value']:.2f}\n"
+    for k, v in sorted(dist.items(), key=lambda x: -x[1])[:3]:
+        msg += f"- {k}: ${v:,.2f}\n"
 
     if alerts:
-        msg += "\n🚨 Alertas:\n"
-        for al in alerts:
-            msg += f"{al}\n"
-    else:
-        msg += "\n✅ Sin alertas relevantes\n"
+        msg += "\n🚨 Alertas:\n" + "\n".join(alerts)
 
-    msg += "\nPipeline funcionando 🤖"
+    msg += "\n\nPipeline funcionando 🤖"
 
     send_telegram(msg)
-
 
 if __name__ == "__main__":
     main()
