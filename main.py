@@ -52,20 +52,18 @@ def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 40, header
 
     if header:
         values = ws.get_all_values()
+
         if not values:
             ws.append_row(header)
         else:
-            # if header mismatch, do not append into wrong schema
+            # Si hay algo, aseguramos que la fila 1 sea el header esperado.
+            # No creamos tabs nuevas.
             if values[0] != header:
-                # create a new sheet with timestamp-like suffix to avoid corruption
-                # (simple deterministic suffix based on date)
-                new_title = f"{title}_{str(date.today()).replace('-', '')}"
-                try:
-                    ws2 = sheet.worksheet(new_title)
-                except gspread.exceptions.WorksheetNotFound:
-                    ws2 = sheet.add_worksheet(title=new_title, rows=rows, cols=cols)
-                    ws2.append_row(header)
-                return ws2
+                # Opción A (recomendada): sobrescribir la fila 1 con el header esperado
+                ws.update("1:1", [header])
+
+                # Si querés ser más estricto y evitar headers duplicados,
+                # no insertamos filas: solo pisamos la primera.
     return ws
 
 def get_all_records(sheet, tab_name: str) -> List[Dict[str, Any]]:
