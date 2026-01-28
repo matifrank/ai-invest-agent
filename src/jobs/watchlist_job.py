@@ -2,7 +2,7 @@ import os
 import requests
 from datetime import date, datetime
 from typing import List
-
+from src.common.iol import get_last_price
 from src.common.sheets import connect_sheets, ensure_worksheet, get_all_records
 from src.common.telegram import send_telegram
 from src.common.iol import IOLClient, parse_iol_quote
@@ -32,16 +32,13 @@ def safe_float(x):
     except:
         return None
 
-def get_ccl_market():
-    try:
-        r = requests.get("https://dolarapi.com/v1/dolares", timeout=10)
-        data = r.json()
-        for item in data:
-            if item.get("casa") == "contadoconliqui":
-                return float(item["venta"])
+def get_mep_ref(iol: IOLClient) -> Optional[float]:
+    # AL30 en pesos vs AL30D en USD (especie D)
+    al30_ars = get_last_price(iol, "bcba", "AL30")
+    al30d_usd = get_last_price(iol, "bcba", "AL30D")
+    if not al30_ars or not al30d_usd or al30d_usd <= 0:
         return None
-    except:
-        return None
+    return al30_ars / al30d_usd
 
 def main():
     sheet = connect_sheets(SPREADSHEET_NAME)
@@ -59,7 +56,15 @@ def main():
     )
 
     watchlist = get_all_records(sheet, WATCHLIST_SHEET)
-    ccl_mkt = get_ccl_market()
+    
+    if not iol:
+        raise RuntimeError("Watchlist requiere IOL para calcular MEP ref (AL30/AL30D).")
+
+    mep_ref = get_mep_ref(iol)
+
+    if not mep_ref:
+        raise RuntimeError("No se pudo calcular MEP ref (AL30/AL30D).")
+
     today = str(date.today())
     now_hhmm = datetime.now().strftime("%H:%M")
 

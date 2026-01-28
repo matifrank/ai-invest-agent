@@ -77,3 +77,15 @@ def parse_iol_quote(q: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]
         bid = _safe_float(puntas[0].get("precioCompra"))
         ask = _safe_float(puntas[0].get("precioVenta"))
     return last, bid, ask
+
+def get_last_price(iol: IOLClient, mercado: str, simbolo: str) -> Optional[float]:
+    q = iol.get_quote(mercado, simbolo)
+    if not q:
+        return None
+    last, bid, ask = parse_iol_quote(q)
+    # preferimos last; si no, mark
+    if last is not None:
+        return last
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2.0
+    return None
