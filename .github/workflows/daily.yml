@@ -2,7 +2,7 @@ name: Daily AI Portfolio Agent
 
 on:
   schedule:
-    - cron: '0 13 * * 1-5'   # 13:00 Argentina (UTC-3)
+    - cron: '0 15 * * 1-5'   # 13:00 Argentina (UTC-3)
   workflow_dispatch:
 
 jobs:
