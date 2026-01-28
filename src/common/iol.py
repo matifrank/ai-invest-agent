@@ -1,7 +1,9 @@
-import time, requests
+import time
+import requests
 from typing import Optional, Dict, Any, Tuple
 
 IOL_BASE = "https://api.invertironline.com"
+
 
 class IOLClient:
     def __init__(self, username: str, password: str):
@@ -61,6 +63,7 @@ class IOLClient:
             return None
         return r.json()
 
+
 def _safe_float(x) -> Optional[float]:
     try:
         if x is None:
@@ -69,23 +72,44 @@ def _safe_float(x) -> Optional[float]:
     except:
         return None
 
-def parse_iol_quote(q: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+
+def parse_iol_quote(q: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normaliza lo más útil del JSON de IOL.
+    """
     last = _safe_float(q.get("ultimoPrecio"))
-    bid = ask = None
+    plazo = q.get("plazo")  # e.g. "T1"
+    monto = _safe_float(q.get("montoOperado"))
+    vol = _safe_float(q.get("volumenNominal"))
+
+    bid = ask = bid_qty = ask_qty = None
     puntas = q.get("puntas") or []
     if isinstance(puntas, list) and puntas and isinstance(puntas[0], dict):
         bid = _safe_float(puntas[0].get("precioCompra"))
         ask = _safe_float(puntas[0].get("precioVenta"))
-    return last, bid, ask
+        bid_qty = _safe_float(puntas[0].get("cantidadCompra"))
+        ask_qty = _safe_float(puntas[0].get("cantidadVenta"))
+
+    return {
+        "last": last,
+        "bid": bid,
+        "ask": ask,
+        "bid_qty": bid_qty,
+        "ask_qty": ask_qty,
+        "plazo": plazo,
+        "montoOperado": monto,
+        "volumenNominal": vol,
+        "raw": q,
+    }
+
 
 def get_last_price(iol: IOLClient, mercado: str, simbolo: str) -> Optional[float]:
     q = iol.get_quote(mercado, simbolo)
     if not q:
         return None
-    last, bid, ask = parse_iol_quote(q)
-    # preferimos last; si no, mark
-    if last is not None:
-        return last
-    if bid is not None and ask is not None:
-        return (bid + ask) / 2.0
+    p = parse_iol_quote(q)
+    if p["last"] is not None:
+        return p["last"]
+    if p["bid"] is not None and p["ask"] is not None:
+        return (p["bid"] + p["ask"]) / 2.0
     return None

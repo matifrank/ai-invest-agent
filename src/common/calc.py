@@ -7,22 +7,12 @@ def ccl_implicit(cedear_ars: float, stock_usd: float, ratio: float) -> Optional[
         return None
     return (cedear_ars * ratio) / stock_usd
 
-def usd_value(qty: float, price_ars: float, ccl_impl: float) -> float:
-    if not ccl_impl or ccl_impl <= 0:
-        return 0.0
-    return (qty * price_ars) / ccl_impl
-
-def gain_usd(qty: float, ppc_ars: float, current_ars: float, ccl_impl: float) -> float:
-    if ppc_ars is None or not ccl_impl or ccl_impl <= 0:
-        return 0.0
-    return qty * (current_ars - ppc_ars) / ccl_impl
-
-def edges_intuitive(bid_ars: float, ask_ars: float, stock_usd: float, ratio: float, ccl_mkt: float, fee_pct_per_tx: float) -> Optional[Dict[str, float]]:
-    if not ccl_mkt or ccl_mkt <= 0:
+def edges_intuitive(bid_ars: float, ask_ars: float, stock_usd: float, ratio: float, fx_ref: float, fee_pct_per_tx: float) -> Optional[Dict[str, float]]:
+    if not fx_ref or fx_ref <= 0:
         return None
 
-    usd_ask = ask_ars / ccl_mkt
-    usd_bid = bid_ars / ccl_mkt
+    usd_ask = ask_ars / fx_ref
+    usd_bid = bid_ars / fx_ref
     usd_stock = stock_usd / ratio
 
     edge_buy_gross = usd_stock - usd_ask
