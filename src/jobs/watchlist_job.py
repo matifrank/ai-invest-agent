@@ -19,34 +19,37 @@ WATCHLIST_ALERT_STATE_SHEET = "watchlist_alert_state"
 
 IOL_MERCADO = "bcba"
 
-BROKER_FEE_PCT = 0.5
+BROKER_FEE_PCT = float(os.environ.get("BROKER_FEE_PCT", "0.5"))
 
-# Thresholds (override via env)
+# Thresholds (strict by default)
 WATCH_MIN_DIFF_PCT = float(os.environ.get("WATCH_MIN_DIFF_PCT", "2.0"))
 WATCH_MIN_NET_USD_PER_CEDEAR = float(os.environ.get("WATCH_MIN_NET_USD_PER_CEDEAR", "0.50"))
 ADR_MAX_ABS_5M_PCT = float(os.environ.get("ADR_MAX_ABS_5M_PCT", "0.25"))
 
+# Target sizing (USD 300–500)
 TARGET_USD = float(os.environ.get("TARGET_USD", "500"))
+
+# Liquidity filter (ARS)
 MIN_MONTO_OPERADO_ARS = int(os.environ.get("MIN_MONTO_OPERADO_ARS", "50000000"))  # 50M ARS
 
+# Plazo (CI/T1/48)
 WATCH_PLAZO_TARGET = os.environ.get("WATCH_PLAZO_TARGET", "T1")
 
+# Allowed windows (ARG)
 ALLOWED_WINDOWS = [
     (11, 0, 13, 0),
     (16, 0, 17, 0),
 ]
 
+# Dedupe
 ALERT_COOLDOWN_MIN = int(os.environ.get("ALERT_COOLDOWN_MIN", "20"))
 ALERT_EDGE_IMPROVE_USD = float(os.environ.get("ALERT_EDGE_IMPROVE_USD", "0.05"))
 
-# ✅ FIX: Reset only when explicitly enabled
-RESET_HISTORY = os.environ.get("RESET_WATCHLIST_HISTORY", "0") == "1"
-
-# If enabled, do NOT send outside windows (but still can write heartbeat/audit)
+# If enabled, do NOT send messages outside allowed windows
 WINDOW_GUARD_ENABLED = os.environ.get("WINDOW_GUARD_ENABLED", "1") == "1"
 
-# Audit mode: write SKIP rows with reasons (helps debugging)
-AUDIT_MODE = os.environ.get("AUDIT_MODE", "0") == "1"
+# Reset beta sheet (run once with RESET_WATCHLIST_HISTORY=1 then back to 0)
+RESET_HISTORY = os.environ.get("RESET_WATCHLIST_HISTORY", "0") == "1"
 
 WATCHLIST_HISTORY_HEADER = [
     "date","time_arg","ticker","ratio",
@@ -70,7 +73,6 @@ WATCHLIST_HISTORY_HEADER = [
 def now_arg() -> datetime:
     return datetime.utcnow() - timedelta(hours=3)
 
-
 def in_allowed_window(dt: datetime) -> bool:
     for sh, sm, eh, em in ALLOWED_WINDOWS:
         start = dt.replace(hour=sh, minute=sm, second=0, microsecond=0)
@@ -79,13 +81,11 @@ def in_allowed_window(dt: datetime) -> bool:
             return True
     return False
 
-
 def parse_iso(dt_str: str) -> Optional[datetime]:
     try:
         return datetime.fromisoformat(dt_str)
     except:
         return None
-
 
 # =========================
 # UTILS
@@ -100,16 +100,13 @@ def safe_float(x) -> Optional[float]:
     except:
         return None
 
-
 def guess_d_symbol(sym: str) -> str:
     return f"{sym}D"
-
 
 def pick_mark_or_last(pq: dict) -> Optional[float]:
     if pq.get("bid") is not None and pq.get("ask") is not None:
         return (pq["bid"] + pq["ask"]) / 2.0
     return pq.get("last")
-
 
 def append_row_aligned(ws, header: list, row: list):
     if len(row) < len(header):
@@ -118,13 +115,11 @@ def append_row_aligned(ws, header: list, row: list):
         row = row[:len(header)]
     ws.append_row(row, value_input_option="USER_ENTERED")
 
-
 def required_cedears_for_target_usd(target_usd: float, bid_d: float, ask_d: float, side: str) -> Optional[int]:
     usd_per_cedear = bid_d if side == "COMPRA" else ask_d
     if not usd_per_cedear or usd_per_cedear <= 0:
         return None
     return int(math.ceil(target_usd / usd_per_cedear))
-
 
 def min_qty_thresholds_for_target(n: int) -> Tuple[int, int]:
     if not n or n <= 0:
@@ -132,7 +127,6 @@ def min_qty_thresholds_for_target(n: int) -> Tuple[int, int]:
     min_ars = max(50, 2 * n)
     min_d = max(20, 2 * n)
     return (min_ars, min_d)
-
 
 def is_executable_for_size(n: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int, side: str) -> bool:
     if not n or n <= 0:
@@ -142,12 +136,13 @@ def is_executable_for_size(n: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d
     else:
         return (bid_qty_ars >= n) and (ask_qty_d >= n)
 
+def side_for_direction(arb_side: str) -> str:
+    return "COMPRA" if arb_side == "barato en ARS / caro en D" else "VENTA"
 
 def instruction_block(side: str) -> str:
     if side == "COMPRA":
         return "✅ BARATO en ARS / CARO en D → Comprá ARS → Vendé D"
     return "✅ CARO en ARS / BARATO en D → Vendé ARS → Comprá D"
-
 
 def footer_instructions() -> str:
     return (
@@ -157,11 +152,6 @@ def footer_instructions() -> str:
         "• Ejecutá la dirección indicada\n"
         "• Si en 30s se movió feo → cancelar/no operar\n"
     )
-
-
-def side_for_direction(arb_side: str) -> str:
-    return "COMPRA" if arb_side == "barato en ARS / caro en D" else "VENTA"
-
 
 # =========================
 # FX REF (MEP) via IOL
@@ -186,7 +176,6 @@ def get_mep_ref(iol: IOLClient, plazo_target: str) -> Optional[float]:
 
     return al30_ars / al30d_usd
 
-
 # =========================
 # DEDUPE STATE (Sheets)
 # =========================
@@ -208,14 +197,7 @@ def load_alert_state(ws_state) -> Dict[str, Dict[str, Any]]:
         }
     return state
 
-
-def should_send_alert(
-    state: Dict[str, Dict[str, Any]],
-    ticker: str,
-    side: str,
-    edge_net: float,
-    now_dt: datetime,
-) -> bool:
+def should_send_alert(state: Dict[str, Dict[str, Any]], ticker: str, side: str, edge_net: float, now_dt: datetime) -> bool:
     t = ticker.upper()
     side = side.upper()
 
@@ -244,7 +226,6 @@ def should_send_alert(
 
     return False
 
-
 def upsert_alert_state(ws_state, state: Dict[str, Dict[str, Any]], ticker: str, side: str, edge_net: float, now_dt: datetime):
     t = ticker.upper()
     side = side.upper()
@@ -256,9 +237,8 @@ def upsert_alert_state(ws_state, state: Dict[str, Dict[str, Any]], ticker: str, 
     else:
         ws_state.append_row([t, side, iso, edge_net])
 
-
 # =========================
-# MAIN
+# MAIN (Silent mode)
 # =========================
 def main():
     sheet = connect_sheets(SPREADSHEET_NAME)
@@ -267,33 +247,13 @@ def main():
         sheet,
         WATCHLIST_HISTORY_SHEET,
         header=WATCHLIST_HISTORY_HEADER,
-        rows=3000,
+        rows=5000,
         cols=len(WATCHLIST_HISTORY_HEADER) + 5,
     )
 
-    # Hard reset (ONLY when RESET_WATCHLIST_HISTORY=1)
     if RESET_HISTORY:
         ws_hist.clear()
         ws_hist.append_row(WATCHLIST_HISTORY_HEADER, value_input_option="RAW")
-
-    # HEARTBEAT (always writes one row per run)
-    dt_arg = now_arg()
-    today = str(date.today())
-    hhmm = dt_arg.strftime("%H:%M")
-    append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-        today, hhmm, "__HEARTBEAT__", "", "", "",
-        "", "", "", "", "", "",
-        "", "", "", "", "",
-        "", "", "",
-        "", "",
-        "", "",
-        "", "",
-        "", "",
-        "", "",
-        "OK", "",
-        "BOT"
-    ])
-    print("✅ Heartbeat appended")
 
     ws_state = ensure_worksheet(
         sheet,
@@ -309,75 +269,53 @@ def main():
 
     iol = IOLClient(os.environ["IOL_USERNAME"], os.environ["IOL_PASSWORD"])
 
-    window_ok = in_allowed_window(dt_arg)
-    print(f"⏰ dt_arg={hhmm} | window_ok={window_ok} | guard={WINDOW_GUARD_ENABLED}")
+    dt_arg = now_arg()
+    today = str(date.today())
+    hhmm = dt_arg.strftime("%H:%M")
 
-    if WINDOW_GUARD_ENABLED and (not window_ok):
-        # Still wrote heartbeat, exit quietly
-        print("⛔ fuera de ventana (guard on). No evalúo oportunidades.")
+    # ✅ NO ensuciar: si está fuera de ventana, salimos sin escribir nada
+    if WINDOW_GUARD_ENABLED and (not in_allowed_window(dt_arg)):
+        return
+
+    # ✅ HEARTBEAT solo dentro de ventana
+    append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
+        today, hhmm, "__HEARTBEAT__", "", "", "",
+        "", "", "", "", "", "",
+        "", "", "", "", "",
+        "", "", "",
+        "", "",
+        "", "",
+        "", "",
+        "", "",
+        "", "",
+        "OK", "",
+        "BOT"
+    ])
+
+    if WINDOW_GUARD_ENABLED and (not in_allowed_window(dt_arg)):
         return
 
     mep_ref = get_mep_ref(iol, WATCH_PLAZO_TARGET)
-    print(f"💱 mep_ref={mep_ref} | plazo_target={WATCH_PLAZO_TARGET}")
     if not mep_ref:
-        print("⛔ Sin MEP ref (AL30/AL30D).")
         return
 
     watchlist = get_all_records(sheet, WATCHLIST_SHEET)
-    print(f"👀 watchlist rows={len(watchlist)} sample={watchlist[:2]}")
+    if not watchlist:
+        return
 
     alerts_to_send: List[str] = []
     pending_state_updates: List[Tuple[str, str, float]] = []
 
-    seen = 0
-    saved = 0
-    skipped = 0
-
     for w in watchlist:
-        seen += 1
         ticker = (w.get("ticker") or "").strip().upper()
         tipo = (w.get("tipo") or "").upper().strip()
         ratio = safe_float(w.get("ratio")) or 1.0
         if not ticker or tipo != "CEDEAR":
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker or "", ratio,
-                    "", "",
-                    "", "", "", "", "", "",
-                    "", "", "", "", "",
-                    mep_ref,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "not_cedear_or_missing_ticker",
-                    "IOL"
-                ])
             continue
 
         # --- ARS quote ---
         q_ars = iol.get_quote(IOL_MERCADO, ticker)
         if not q_ars:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    "", "",
-                    "", "", "", "", "", "",
-                    "", "", "", "", "",
-                    mep_ref,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "no_ars_quote",
-                    "IOL"
-                ])
             continue
 
         p_ars = parse_iol_quote(q_ars)
@@ -389,63 +327,10 @@ def main():
         monto_ars = p_ars.get("montoOperado")
 
         if plazo_ars != WATCH_PLAZO_TARGET:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    "", "",
-                    bid or "", ask or "", bid_qty, ask_qty, plazo_ars or "", monto_ars or "",
-                    "", "", "", "", "",
-                    mep_ref,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "plazo_ars_mismatch",
-                    "IOL"
-                ])
             continue
-
         if bid is None or ask is None:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    "", "",
-                    bid or "", ask or "", bid_qty, ask_qty, plazo_ars or "", monto_ars or "",
-                    "", "", "", "", "",
-                    mep_ref,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "no_bid_ask_ars",
-                    "IOL"
-                ])
             continue
-
         if monto_ars is not None and monto_ars < MIN_MONTO_OPERADO_ARS:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    "", "",
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars,
-                    "", "", "", "", "",
-                    mep_ref,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "monto_operado_ars_bajo",
-                    "IOL"
-                ])
             continue
 
         # --- D quote ---
@@ -455,23 +340,6 @@ def main():
         q_d = iol.get_quote(IOL_MERCADO, sym_d)
         p_d = parse_iol_quote(q_d) if q_d else None
         if not p_d:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    "", "",
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    "", "", "", "", "",
-                    mep_ref,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "no_d_quote",
-                    "IOL"
-                ])
             continue
 
         bid_d = p_d.get("bid")
@@ -481,108 +349,22 @@ def main():
         ask_qty_d = int(p_d.get("ask_qty") or 0)
 
         if plazo_d != WATCH_PLAZO_TARGET:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    "", "",
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d or "", ask_d or "", bid_qty_d, ask_qty_d, plazo_d or "",
-                    mep_ref,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "plazo_d_mismatch",
-                    "IOL"
-                ])
             continue
-
         if bid_d is None or ask_d is None:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    "", "",
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d or "", ask_d or "", bid_qty_d, ask_qty_d, plazo_d or "",
-                    mep_ref,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "no_bid_ask_d",
-                    "IOL"
-                ])
             continue
 
         # ADR proxy (NYSE)
         stock_usd = stock_usd_price(ticker)
         adr_5m = stock_usd_change_5m_pct(ticker)
         if stock_usd is None or adr_5m is None:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd or "", adr_5m or "",
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "yahoo_missing",
-                    "IOL"
-                ])
             continue
-
         if abs(adr_5m) > ADR_MAX_ABS_5M_PCT:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd, adr_5m,
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "adr_moved",
-                    "IOL"
-                ])
             continue
 
+        # Implicit vs MEP based on stock USD anchor
         ccl_buy = ccl_implicit(ask, stock_usd, ratio)
         ccl_sell = ccl_implicit(bid, stock_usd, ratio)
         if not ccl_buy or not ccl_sell:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd, adr_5m,
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    ccl_buy or "", ccl_sell or "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "ccl_calc_failed",
-                    "IOL"
-                ])
             continue
 
         diff_buy = (ccl_buy - mep_ref) / mep_ref * 100
@@ -590,26 +372,9 @@ def main():
 
         pack = edges_intuitive(bid, ask, stock_usd, ratio, mep_ref, BROKER_FEE_PCT)
         if not pack:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd, adr_5m,
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    ccl_buy, ccl_sell,
-                    diff_buy, diff_sell,
-                    "", "",
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "edges_failed",
-                    "IOL"
-                ])
             continue
 
-        # ARS vs D
+        # ARS vs D relation (direction)
         price_ars_mark = (bid + ask) / 2.0
         price_d_mark = (bid_d + ask_d) / 2.0
 
@@ -626,107 +391,26 @@ def main():
         elif usd_per_cedear_ars > usd_per_cedear_d:
             arb_side = "caro en ARS / barato en D"
         else:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd, adr_5m,
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    ccl_buy, ccl_sell,
-                    diff_buy, diff_sell,
-                    pack["edge_buy_net"], pack["edge_sell_net"],
-                    "", "",
-                    "", "",
-                    "", "",
-                    "SKIP", "arb_equal",
-                    "IOL"
-                ])
             continue
 
         recommended_side = side_for_direction(arb_side)
+
+        # Target sizing & dynamic liquidity
         n_cedears = required_cedears_for_target_usd(TARGET_USD, bid_d, ask_d, recommended_side)
         if not n_cedears:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd, adr_5m,
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    ccl_buy, ccl_sell,
-                    diff_buy, diff_sell,
-                    pack["edge_buy_net"], pack["edge_sell_net"],
-                    arb_side, arb_edge_net,
-                    "", "", "", "",
-                    "SKIP", "n_cedears_none",
-                    "IOL"
-                ])
             continue
 
         min_book_ars, min_book_d = min_qty_thresholds_for_target(n_cedears)
+
+        # Need both books healthy
         if bid_qty < min_book_ars or ask_qty < min_book_ars:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd, adr_5m,
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    ccl_buy, ccl_sell,
-                    diff_buy, diff_sell,
-                    pack["edge_buy_net"], pack["edge_sell_net"],
-                    arb_side, arb_edge_net,
-                    recommended_side, n_cedears,
-                    min_book_ars, min_book_d,
-                    "SKIP", "book_ars_small",
-                    "IOL"
-                ])
             continue
-
         if bid_qty_d < min_book_d or ask_qty_d < min_book_d:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd, adr_5m,
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    ccl_buy, ccl_sell,
-                    diff_buy, diff_sell,
-                    pack["edge_buy_net"], pack["edge_sell_net"],
-                    arb_side, arb_edge_net,
-                    recommended_side, n_cedears,
-                    min_book_ars, min_book_d,
-                    "SKIP", "book_d_small",
-                    "IOL"
-                ])
             continue
-
         if not is_executable_for_size(n_cedears, bid_qty, ask_qty, bid_qty_d, ask_qty_d, recommended_side):
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd, adr_5m,
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    ccl_buy, ccl_sell,
-                    diff_buy, diff_sell,
-                    pack["edge_buy_net"], pack["edge_sell_net"],
-                    arb_side, arb_edge_net,
-                    recommended_side, n_cedears,
-                    min_book_ars, min_book_d,
-                    "SKIP", "not_executable_now",
-                    "IOL"
-                ])
             continue
 
+        # Choose diff/edge that matches recommended direction (non-marginal)
         if recommended_side == "COMPRA":
             side = "COMPRA"
             diff_pct = diff_buy
@@ -739,46 +423,11 @@ def main():
             impl_show = ccl_sell
 
         if abs(diff_pct) < WATCH_MIN_DIFF_PCT:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd, adr_5m,
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    ccl_buy, ccl_sell,
-                    diff_buy, diff_sell,
-                    pack["edge_buy_net"], pack["edge_sell_net"],
-                    arb_side, arb_edge_net,
-                    side, n_cedears,
-                    min_book_ars, min_book_d,
-                    "SKIP", "diff_below_threshold",
-                    "IOL"
-                ])
             continue
-
         if edge_net < WATCH_MIN_NET_USD_PER_CEDEAR:
-            skipped += 1
-            if AUDIT_MODE:
-                append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-                    today, hhmm, ticker, ratio,
-                    stock_usd, adr_5m,
-                    bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars or "",
-                    bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-                    mep_ref,
-                    ccl_buy, ccl_sell,
-                    diff_buy, diff_sell,
-                    pack["edge_buy_net"], pack["edge_sell_net"],
-                    arb_side, arb_edge_net,
-                    side, n_cedears,
-                    min_book_ars, min_book_d,
-                    "SKIP", "edge_below_threshold",
-                    "IOL"
-                ])
             continue
 
-        # ✅ SAVE OK row
+        # SAVE OK row only
         append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
             today, hhmm, ticker, ratio,
             stock_usd, adr_5m,
@@ -794,7 +443,6 @@ def main():
             "OK", "",
             "IOL"
         ])
-        saved += 1
 
         if should_send_alert(state, ticker, side, edge_net, dt_arg):
             alerts_to_send.append(
@@ -807,8 +455,7 @@ def main():
             )
             pending_state_updates.append((ticker, side, edge_net))
 
-    print(f"✅ FIN watchlist | seen={seen} | saved={saved} | skipped={skipped} | alerts={len(alerts_to_send)}")
-
+    # Silent: only send if there are real opportunities
     if alerts_to_send:
         msg = (
             f"👀 Watchlist intradía — oportunidades FX\n"
@@ -820,9 +467,6 @@ def main():
 
         for t, side, edge in pending_state_updates:
             upsert_alert_state(ws_state, state, t, side, edge, dt_arg)
-    else:
-        print("ℹ️ No hubo oportunidades (o quedó en SKIP).")
-
 
 if __name__ == "__main__":
     main()
