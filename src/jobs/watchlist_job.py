@@ -15,26 +15,24 @@ from src.common.calc import ccl_implicit, edges_intuitive
 SPREADSHEET_NAME = "ai-portfolio-agent"
 WATCHLIST_SHEET = "watchlist"
 WATCHLIST_HISTORY_SHEET = "watchlist_history_v2"
-WATCHLIST_ALERT_STATE_SHEET = "watchlist_alert_state"  # dedupe state
+WATCHLIST_ALERT_STATE_SHEET = "watchlist_alert_state"
 
 IOL_MERCADO = "bcba"
 
 BROKER_FEE_PCT = 0.5
 
-# --- Opportunity thresholds (more strict, non-marginal) ---
-WATCH_MIN_DIFF_PCT = float(os.environ.get("WATCH_MIN_DIFF_PCT", "2.0"))  # was 1.5
-WATCH_MIN_NET_USD_PER_CEDEAR = float(os.environ.get("WATCH_MIN_NET_USD_PER_CEDEAR", "0.50"))  # was 0.05
+# Strict / Premium thresholds
+WATCH_MIN_DIFF_PCT = float(os.environ.get("WATCH_MIN_DIFF_PCT", "2.0"))
+WATCH_MIN_NET_USD_PER_CEDEAR = float(os.environ.get("WATCH_MIN_NET_USD_PER_CEDEAR", "0.50"))
 ADR_MAX_ABS_5M_PCT = float(os.environ.get("ADR_MAX_ABS_5M_PCT", "0.25"))
 
-# Trade size you want to validate (USD 300–500 typical)
+# Target sizing (USD 300–500)
 TARGET_USD = float(os.environ.get("TARGET_USD", "500"))
 
-# Liquidity filters
+# Liquidity filters (ARS)
 MIN_MONTO_OPERADO_ARS = int(os.environ.get("MIN_MONTO_OPERADO_ARS", "50000000"))  # 50M ARS
-MIN_TOP_QTY = int(os.environ.get("MIN_TOP_QTY", "50"))  # mínimo en top of book (cantidad)
-MIN_TOP_QTY_D = int(os.environ.get("MIN_TOP_QTY_D", "10"))  # D suele ser más finita
 
-# Plazo (no mezclar CI vs 48)
+# Plazo (para no mezclar CI vs 48)
 WATCH_PLAZO_TARGET = os.environ.get("WATCH_PLAZO_TARGET", "T1")
 
 # Allowed windows (ARG)
@@ -99,16 +97,27 @@ def pick_mark_or_last(pq: dict) -> Optional[float]:
 
 def required_cedears_for_target_usd(target_usd: float, bid_d: float, ask_d: float, side: str) -> Optional[int]:
     """
-    side: "COMPRA" means buy ARS then sell D -> you will SELL in D at bid_d.
-          "VENTA" means sell ARS then buy D -> you will BUY in D at ask_d.
+    side:
+      - COMPRA: Comprá ARS (ask_ars) -> Vendé D (bid_d)
+      - VENTA : Vendé ARS (bid_ars) -> Comprá D (ask_d)
     """
-    if side == "COMPRA":
-        usd_per_cedear = bid_d
-    else:
-        usd_per_cedear = ask_d
+    usd_per_cedear = bid_d if side == "COMPRA" else ask_d
     if not usd_per_cedear or usd_per_cedear <= 0:
         return None
     return int(math.ceil(target_usd / usd_per_cedear))
+
+
+def min_qty_thresholds_for_target(n: int) -> Tuple[int, int]:
+    """
+    Premium mode: pedimos ~2×n en la punta.
+    ARS: mínimo 50
+    D  : mínimo 20 (D suele ser más finita y si es 10 se vuelve ruidoso)
+    """
+    if not n or n <= 0:
+        return (50, 20)
+    min_ars = max(50, 2 * n)
+    min_d = max(20, 2 * n)
+    return (min_ars, min_d)
 
 
 def is_executable_for_size(n: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int, side: str) -> bool:
@@ -138,6 +147,12 @@ def footer_instructions() -> str:
         "3) Ejecutá la dirección indicada (mismo plazo)\n"
         "4) Si no se confirma en 30s → no operar\n"
     )
+
+
+def side_for_direction(arb_side: str) -> str:
+    if arb_side == "barato en ARS / caro en D":
+        return "COMPRA"
+    return "VENTA"
 
 
 # =========================
@@ -206,7 +221,6 @@ def should_send_alert(
 
     if prev_side and prev_side != side:
         return True
-
     if not prev_time:
         return True
 
@@ -255,7 +269,8 @@ def main():
             "diff_buy_pct","diff_sell_pct",
             "edge_buy_net","edge_sell_net",
             "arb_side","arb_edge_net",
-            "recommended_side","recommended_steps","n_cedears_target",
+            "recommended_side","n_cedears_target",
+            "min_book_ars","min_book_d",
             "source"
         ],
     )
@@ -319,8 +334,6 @@ def main():
 
         if monto_ars is not None and monto_ars < MIN_MONTO_OPERADO_ARS:
             continue
-        if bid_qty_i < MIN_TOP_QTY or ask_qty_i < MIN_TOP_QTY:
-            continue
 
         # --- D quote ---
         ticker_d = (w.get("ticker_d") or "").strip().upper()
@@ -328,39 +341,29 @@ def main():
 
         q_d = iol.get_quote(IOL_MERCADO, sym_d)
         p_d = parse_iol_quote(q_d) if q_d else None
-
-        bid_d = ask_d = plazo_d = None
-        bid_qty_d = ask_qty_d = 0
-        has_d = False
-
-        if p_d:
-            bid_d = p_d.get("bid")
-            ask_d = p_d.get("ask")
-            plazo_d = p_d.get("plazo")
-            bid_qty_d = int(p_d.get("bid_qty") or 0)
-            ask_qty_d = int(p_d.get("ask_qty") or 0)
-
-            if plazo_d == WATCH_PLAZO_TARGET and bid_d is not None and ask_d is not None:
-                has_d = True
-
-        # Need D for actionable ARS<->D guidance
-        if not has_d:
+        if not p_d:
             continue
 
-        # D liquidity (more permissive but not zero)
-        if bid_qty_d < MIN_TOP_QTY_D or ask_qty_d < MIN_TOP_QTY_D:
+        bid_d = p_d.get("bid")
+        ask_d = p_d.get("ask")
+        plazo_d = p_d.get("plazo")
+        bid_qty_d = int(p_d.get("bid_qty") or 0)
+        ask_qty_d = int(p_d.get("ask_qty") or 0)
+
+        if plazo_d != WATCH_PLAZO_TARGET:
+            continue
+        if bid_d is None or ask_d is None:
             continue
 
-        # ADR proxy
+        # ADR proxy (NYSE)
         stock_usd = stock_usd_price(ticker)
         adr_5m = stock_usd_change_5m_pct(ticker)
         if stock_usd is None or adr_5m is None:
             continue
-
         if abs(adr_5m) > ADR_MAX_ABS_5M_PCT:
             continue
 
-        # MEP-anchored implicit via stock USD (legacy metrics)
+        # Legacy implicit vs MEP based on stock USD anchor
         ccl_buy = ccl_implicit(ask, stock_usd, ratio)
         ccl_sell = ccl_implicit(bid, stock_usd, ratio)
         if not ccl_buy or not ccl_sell:
@@ -373,9 +376,10 @@ def main():
         if not pack:
             continue
 
-        # ARS vs D net edge (execution-like, based on marks)
+        # --- ARS vs D relation (for direction) ---
         price_ars_mark = (bid + ask) / 2.0
         price_d_mark = (bid_d + ask_d) / 2.0
+
         usd_per_cedear_ars = price_ars_mark / mep_ref
         usd_per_cedear_d = price_d_mark
 
@@ -389,62 +393,69 @@ def main():
             arb_side = "barato en ARS / caro en D"
         elif usd_per_cedear_ars > usd_per_cedear_d:
             arb_side = "caro en ARS / barato en D"
+        else:
+            continue
 
-        # Recommended direction based on ARS vs D relation
-        # If ARS cheaper than D -> COMPRA ARS then VENDER D (gain USD)
-        # If ARS more expensive than D -> VENTA ARS then COMPRAR D
-        recommended_side = "COMPRA" if arb_side == "barato en ARS / caro en D" else "VENTA"
-        recommended_steps = instruction_block(recommended_side)
+        recommended_side = side_for_direction(arb_side)
 
-        # Size feasibility
-        n_cedears = required_cedears_for_target_usd(TARGET_USD, bid_d, ask_d, recommended_side) or 0
-        executable = is_executable_for_size(n_cedears, bid_qty_i, ask_qty_i, bid_qty_d, ask_qty_d, recommended_side)
+        # --- Size & dynamic liquidity (2×n premium) ---
+        n_cedears = required_cedears_for_target_usd(TARGET_USD, bid_d, ask_d, recommended_side)
+        if not n_cedears:
+            continue
 
-        # Save history always (auditable)
+        min_book_ars, min_book_d = min_qty_thresholds_for_target(n_cedears)
+
+        # Need both sides healthy to avoid phantom book
+        if bid_qty_i < min_book_ars or ask_qty_i < min_book_ars:
+            continue
+        if bid_qty_d < min_book_d or ask_qty_d < min_book_d:
+            continue
+
+        if not is_executable_for_size(n_cedears, bid_qty_i, ask_qty_i, bid_qty_d, ask_qty_d, recommended_side):
+            continue
+
+        # Pick matching diff/edge to enforce non-marginal opportunities
+        if recommended_side == "COMPRA":
+            side = "COMPRA"
+            diff_pct = diff_buy
+            edge_net = float(pack["edge_buy_net"])
+            impl_show = ccl_buy
+        else:
+            side = "VENTA"
+            diff_pct = diff_sell
+            edge_net = float(pack["edge_sell_net"])
+            impl_show = ccl_sell
+
+        if abs(diff_pct) < WATCH_MIN_DIFF_PCT:
+            continue
+        if edge_net < WATCH_MIN_NET_USD_PER_CEDEAR:
+            continue
+
+        # Save history (auditable)
         ws_hist.append_row([
             today, hhmm, ticker, ratio,
             stock_usd, adr_5m,
-            bid, ask,
-            bid_qty_i, ask_qty_i,
+            bid, ask, bid_qty_i, ask_qty_i,
             plazo_ars, monto_ars if monto_ars is not None else "",
             bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
             mep_ref,
             ccl_buy, ccl_sell,
             diff_buy, diff_sell,
             pack["edge_buy_net"], pack["edge_sell_net"],
-            arb_side,
-            arb_edge_net if arb_edge_net is not None else "",
-            recommended_side, recommended_steps, n_cedears if n_cedears else "",
+            arb_side, arb_edge_net,
+            side, n_cedears,
+            min_book_ars, min_book_d,
             "IOL"
         ])
-
-        # --- Alert selection (strict, non-marginal) ---
-        # Use "recommended_side" and the corresponding net edge from pack:
-        # If recommended is COMPRA -> we care about edge_buy_net and diff_buy (negative vs MEP)
-        # If recommended is VENTA  -> edge_sell_net and diff_sell (positive vs MEP)
-        if recommended_side == "COMPRA":
-            side = "COMPRA"
-            diff_pct = diff_buy
-            edge_net = float(pack["edge_buy_net"])
-        else:
-            side = "VENTA"
-            diff_pct = diff_sell
-            edge_net = float(pack["edge_sell_net"])
-
-        if abs(diff_pct) < WATCH_MIN_DIFF_PCT:
-            continue
-        if edge_net < WATCH_MIN_NET_USD_PER_CEDEAR:
-            continue
-        if not executable:
-            continue
 
         if should_send_alert(state, ticker, side, edge_net, dt_arg):
             alerts_to_send.append(
                 f"🔔 {ticker} — {side} FX\n"
-                f"{recommended_steps}\n"
-                f"Impl: {('%.0f' % (ccl_buy if side=='COMPRA' else ccl_sell))} | MEP(AL30): {mep_ref:.0f} | {diff_pct:+.1f}% | {WATCH_PLAZO_TARGET}\n"
+                f"{instruction_block(side)}\n"
+                f"Impl: {impl_show:.0f} | MEP(AL30): {mep_ref:.0f} | {diff_pct:+.1f}% | {WATCH_PLAZO_TARGET}\n"
                 f"ADR 5m: {adr_5m:+.2f}% | {hhmm}\n"
-                f"Neto: {edge_net:.2f} USD/CEDEAR | ~{TARGET_USD:.0f} USD ⇒ {n_cedears} CEDEARs (book OK)"
+                f"Neto: {edge_net:.2f} USD/CEDEAR | ~{TARGET_USD:.0f} USD ⇒ {n_cedears} CEDEARs\n"
+                f"Book mínimo usado: ARS≥{min_book_ars} | D≥{min_book_d}"
             )
             pending_state_updates.append((ticker, side, edge_net))
 
