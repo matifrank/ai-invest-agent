@@ -22,15 +22,15 @@ IOL_MERCADO = "bcba"
 BROKER_FEE_PCT = 0.5
 
 # Strict / Premium thresholds
-WATCH_MIN_DIFF_PCT = float(os.environ.get("WATCH_MIN_DIFF_PCT", "2.0"))
-WATCH_MIN_NET_USD_PER_CEDEAR = float(os.environ.get("WATCH_MIN_NET_USD_PER_CEDEAR", "0.50"))
-ADR_MAX_ABS_5M_PCT = float(os.environ.get("ADR_MAX_ABS_5M_PCT", "0.25"))
+WATCH_MIN_DIFF_PCT = float(os.environ.get("WATCH_MIN_DIFF_PCT", "0.0"))
+WATCH_MIN_NET_USD_PER_CEDEAR = float(os.environ.get("WATCH_MIN_NET_USD_PER_CEDEAR", "-999"))
+ADR_MAX_ABS_5M_PCT = float(os.environ.get("ADR_MAX_ABS_5M_PCT", "999"))
 
 # Target sizing (USD 300–500)
 TARGET_USD = float(os.environ.get("TARGET_USD", "500"))
 
 # Liquidity filters (ARS)
-MIN_MONTO_OPERADO_ARS = int(os.environ.get("MIN_MONTO_OPERADO_ARS", "50000000"))  # 50M ARS
+MIN_MONTO_OPERADO_ARS = int(os.environ.get("MIN_MONTO_OPERADO_ARS", "0"))  # 50M ARS
 
 # Plazo (para no mezclar CI vs 48)
 WATCH_PLAZO_TARGET = os.environ.get("WATCH_PLAZO_TARGET", "T1")
@@ -49,7 +49,7 @@ ALERT_EDGE_IMPROVE_USD = float(os.environ.get("ALERT_EDGE_IMPROVE_USD", "0.05"))
 RESET_HISTORY = os.environ.get("RESET_WATCHLIST_HISTORY", "0") == "0"
 
 # If enabled, do NOT send messages outside allowed windows
-WINDOW_GUARD_ENABLED = os.environ.get("WINDOW_GUARD_ENABLED", "1") == "1"
+WINDOW_GUARD_ENABLED = os.environ.get("WINDOW_GUARD_ENABLED", "1") == "0"
 
 
 WATCHLIST_HISTORY_HEADER = [
