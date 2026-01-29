@@ -45,8 +45,27 @@ ALLOWED_WINDOWS = [
 ALERT_COOLDOWN_MIN = int(os.environ.get("ALERT_COOLDOWN_MIN", "20"))
 ALERT_EDGE_IMPROVE_USD = float(os.environ.get("ALERT_EDGE_IMPROVE_USD", "0.05"))
 
+# Reset beta sheet (run once with RESET_WATCHLIST_HISTORY=1, then set back to 0)
+RESET_HISTORY = os.environ.get("RESET_WATCHLIST_HISTORY", "0") == "1"
+
+# If enabled, do NOT send messages outside allowed windows
 WINDOW_GUARD_ENABLED = os.environ.get("WINDOW_GUARD_ENABLED", "1") == "1"
 
+
+WATCHLIST_HISTORY_HEADER = [
+    "date","time_arg","ticker","ratio",
+    "stock_usd","adr_5m_pct",
+    "bid_ars","ask_ars","bid_qty","ask_qty","plazo_ars","montoOperado_ars",
+    "bid_d","ask_d","bid_qty_d","ask_qty_d","plazo_d",
+    "mep_ref",
+    "ccl_buy","ccl_sell",
+    "diff_buy_pct","diff_sell_pct",
+    "edge_buy_net","edge_sell_net",
+    "arb_side","arb_edge_net",
+    "recommended_side","n_cedears_target",
+    "min_book_ars","min_book_d",
+    "source"
+]
 
 # =========================
 # TIME HELPERS
@@ -95,11 +114,23 @@ def pick_mark_or_last(pq: dict) -> Optional[float]:
     return pq.get("last")
 
 
+def append_row_aligned(ws, header: list, row: list):
+    """
+    Alinea largo fila al header: pad con "" o trunca.
+    Evita corrimientos si alguien toca el schema.
+    """
+    if len(row) < len(header):
+        row = row + [""] * (len(header) - len(row))
+    elif len(row) > len(header):
+        row = row[:len(header)]
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
+
 def required_cedears_for_target_usd(target_usd: float, bid_d: float, ask_d: float, side: str) -> Optional[int]:
     """
     side:
-      - COMPRA: Comprá ARS (ask_ars) -> Vendé D (bid_d)
-      - VENTA : Vendé ARS (bid_ars) -> Comprá D (ask_d)
+      - COMPRA: Comprá ARS -> Vendé D (lo que importa es bid_d al vender)
+      - VENTA : Vendé ARS -> Comprá D (lo que importa es ask_d al comprar)
     """
     usd_per_cedear = bid_d if side == "COMPRA" else ask_d
     if not usd_per_cedear or usd_per_cedear <= 0:
@@ -109,9 +140,9 @@ def required_cedears_for_target_usd(target_usd: float, bid_d: float, ask_d: floa
 
 def min_qty_thresholds_for_target(n: int) -> Tuple[int, int]:
     """
-    Premium mode: pedimos ~2×n en la punta.
+    Premium: pedimos ~2×n en la punta.
     ARS: mínimo 50
-    D  : mínimo 20 (D suele ser más finita y si es 10 se vuelve ruidoso)
+    D  : mínimo 20
     """
     if not n or n <= 0:
         return (50, 20)
@@ -141,18 +172,16 @@ def instruction_block(side: str) -> str:
 
 def footer_instructions() -> str:
     return (
-        "\n\n🧾 Instrucciones rápidas:\n"
-        "1) Abrí ARS y D del ticker elegido\n"
-        "2) Mirá puntas (bid/ask) y confirmá que sigue >2%\n"
-        "3) Ejecutá la dirección indicada (mismo plazo)\n"
-        "4) Si no se confirma en 30s → no operar\n"
+        "\n\n🧾 Checklist ultra corto:\n"
+        "• Abrí ARS y D (mismo plazo)\n"
+        "• Confirmá puntas + cantidades (no se vació el book)\n"
+        "• Ejecutá la dirección indicada\n"
+        "• Si en 30s se movió feo → cancelar/no operar\n"
     )
 
 
 def side_for_direction(arb_side: str) -> str:
-    if arb_side == "barato en ARS / caro en D":
-        return "COMPRA"
-    return "VENTA"
+    return "COMPRA" if arb_side == "barato en ARS / caro en D" else "VENTA"
 
 
 # =========================
@@ -258,22 +287,15 @@ def main():
     ws_hist = ensure_worksheet(
         sheet,
         WATCHLIST_HISTORY_SHEET,
-        header=[
-            "date","time_arg","ticker","ratio",
-            "stock_usd","adr_5m_pct",
-            "bid_ars","ask_ars","bid_qty","ask_qty",
-            "plazo_ars","montoOperado_ars",
-            "bid_d","ask_d","bid_qty_d","ask_qty_d","plazo_d",
-            "mep_ref",
-            "ccl_buy","ccl_sell",
-            "diff_buy_pct","diff_sell_pct",
-            "edge_buy_net","edge_sell_net",
-            "arb_side","arb_edge_net",
-            "recommended_side","n_cedears_target",
-            "min_book_ars","min_book_d",
-            "source"
-        ],
+        header=WATCHLIST_HISTORY_HEADER,
+        rows=2000,
+        cols=len(WATCHLIST_HISTORY_HEADER) + 5,
     )
+
+    # Hard reset for beta (run once)
+    if RESET_HISTORY:
+        ws_hist.clear()
+        ws_hist.append_row(WATCHLIST_HISTORY_HEADER, value_input_option="RAW")
 
     ws_state = ensure_worksheet(
         sheet,
@@ -410,7 +432,6 @@ def main():
             continue
         if bid_qty_d < min_book_d or ask_qty_d < min_book_d:
             continue
-
         if not is_executable_for_size(n_cedears, bid_qty_i, ask_qty_i, bid_qty_d, ask_qty_d, recommended_side):
             continue
 
@@ -431,12 +452,11 @@ def main():
         if edge_net < WATCH_MIN_NET_USD_PER_CEDEAR:
             continue
 
-        # Save history (auditable)
-        ws_hist.append_row([
+        # Save history (auditable, stable schema)
+        append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
             today, hhmm, ticker, ratio,
             stock_usd, adr_5m,
-            bid, ask, bid_qty_i, ask_qty_i,
-            plazo_ars, monto_ars if monto_ars is not None else "",
+            bid, ask, bid_qty_i, ask_qty_i, plazo_ars, monto_ars if monto_ars is not None else "",
             bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
             mep_ref,
             ccl_buy, ccl_sell,
