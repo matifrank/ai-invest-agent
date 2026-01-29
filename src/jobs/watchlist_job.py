@@ -46,7 +46,7 @@ ALERT_COOLDOWN_MIN = int(os.environ.get("ALERT_COOLDOWN_MIN", "20"))
 ALERT_EDGE_IMPROVE_USD = float(os.environ.get("ALERT_EDGE_IMPROVE_USD", "0.05"))
 
 # Reset beta sheet (run once with RESET_WATCHLIST_HISTORY=1, then set back to 0)
-RESET_HISTORY = os.environ.get("RESET_WATCHLIST_HISTORY", "0") == "1"
+RESET_HISTORY = os.environ.get("RESET_WATCHLIST_HISTORY", "0") == "0"
 
 # If enabled, do NOT send messages outside allowed windows
 WINDOW_GUARD_ENABLED = os.environ.get("WINDOW_GUARD_ENABLED", "1") == "1"
