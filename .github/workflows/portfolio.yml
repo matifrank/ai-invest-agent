@@ -3,7 +3,7 @@ name: Portfolio Daily
 on:
   schedule:
     - cron: "10 15 * * 1-5"  # Lun-Vie 15:10 UTC = 12:10 ART
-    - cron: "10 19 * * 1-5"  # Lun-Vie 19:10 UTC = 16:10 ART
+    - cron: "30 19 * * 1-5"  # Lun-Vie 19:30 UTC = 16:30 ART
   workflow_dispatch: {}
 
 jobs:
