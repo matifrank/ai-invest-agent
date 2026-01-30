@@ -61,6 +61,12 @@ WATCHLIST_HISTORY_HEADER = [
     "min_book_ars","min_book_d",
     "status","skip_reason","source"
 ]
+# Flags visuales (NO filtran, solo etiquetan)
+FLAG_STRONG_EDGE_USD = float(os.environ.get("FLAG_STRONG_EDGE_USD", "0.80"))
+FLAG_STRONG_DIFF_PCT = float(os.environ.get("FLAG_STRONG_DIFF_PCT", "3.0"))
+
+FLAG_ULTRA_EDGE_USD = float(os.environ.get("FLAG_ULTRA_EDGE_USD", "1.50"))
+FLAG_ULTRA_DIFF_PCT = float(os.environ.get("FLAG_ULTRA_DIFF_PCT", "4.0"))
 
 # =========================
 # TIME
@@ -148,6 +154,43 @@ def footer_instructions() -> str:
 
 def side_for_direction(arb_side: str) -> str:
     return "COMPRA" if arb_side == "barato en ARS / caro en D" else "VENTA"
+
+def has_ultra_liquidity(n: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int) -> bool:
+    """
+    ULTRA = book sobrado (4× tamaño objetivo) en ambos mercados
+    """
+    if not n or n <= 0:
+        return False
+    return (
+        bid_qty_ars >= 4 * n and
+        ask_qty_ars >= 4 * n and
+        bid_qty_d >= 4 * n and
+        ask_qty_d >= 4 * n
+    )
+
+def opportunity_flag(
+    edge_net: float,
+    diff_pct: float,
+    n_cedears: int,
+    bid_qty_ars: int,
+    ask_qty_ars: int,
+    bid_qty_d: int,
+    ask_qty_d: int,
+) -> str:
+    """
+    Clasifica la oportunidad en ULTRA / STRONG / MEDIUM
+    """
+    if (
+        edge_net >= FLAG_ULTRA_EDGE_USD and
+        abs(diff_pct) >= FLAG_ULTRA_DIFF_PCT and
+        has_ultra_liquidity(n_cedears, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d)
+    ):
+        return "🔥 ULTRA"
+
+    if edge_net >= FLAG_STRONG_EDGE_USD or abs(diff_pct) >= FLAG_STRONG_DIFF_PCT:
+        return "🟢 STRONG"
+
+    return "🟡 MEDIUM"
 
 # =========================
 # FX REF (MEP) via IOL
@@ -397,6 +440,17 @@ def main():
             continue
         if edge_net < WATCH_MIN_NET_USD_PER_CEDEAR:
             continue
+        
+        # Clasificación visual de oportunidad
+        flag = opportunity_flag(
+            edge_net,
+            diff_pct,
+            n_cedears,
+            bid_qty_i,
+            ask_qty_i,
+            bid_qty_d,
+            ask_qty_d,
+        )
 
         # Passed: prepare row write + alert
         row = [
@@ -418,12 +472,12 @@ def main():
         # Dedupe alerts
         if should_send_alert(state, ticker, recommended_side, edge_net, dt_arg):
             alerts_to_send.append(
-                f"🔔 {ticker} — {recommended_side} FX\n"
-                f"{instruction_block(recommended_side)}\n"
+                f"{flag} 🔔 {ticker} — {side} FX\n"
+                f"{instruction_block(side)}\n"
                 f"Impl: {impl_show:.0f} | MEP(AL30): {mep_ref:.0f} | {diff_pct:+.1f}% | {WATCH_PLAZO_TARGET}\n"
                 f"ADR 5m: {adr_5m:+.2f}% | {hhmm}\n"
                 f"Neto: {edge_net:.2f} USD/CEDEAR | ~{TARGET_USD:.0f} USD ⇒ {n_cedears} CEDEARs\n"
-                f"Book mínimo: ARS≥{min_book_ars} | D≥{min_book_d}"
+                f"Book: ARS {bid_qty_i}/{ask_qty_i} | D {bid_qty_d}/{ask_qty_d}"
             )
             pending_state_updates.append((ticker, recommended_side, edge_net))
 
