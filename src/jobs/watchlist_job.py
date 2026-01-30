@@ -18,21 +18,20 @@ WATCHLIST_HISTORY_SHEET = "watchlist_history_v2"
 WATCHLIST_ALERT_STATE_SHEET = "watchlist_alert_state"
 
 IOL_MERCADO = "bcba"
+BROKER_FEE_PCT = 0.5
 
-BROKER_FEE_PCT = float(os.environ.get("BROKER_FEE_PCT", "0.5"))
+# Thresholds
+WATCH_MIN_DIFF_PCT = float(os.environ.get("WATCH_MIN_DIFF_PCT", "2.0"))           # % vs MEP
+WATCH_MIN_NET_USD_PER_CEDEAR = float(os.environ.get("WATCH_MIN_NET_USD_PER_CEDEAR", "0.50"))  # USD/cedear net
+ADR_MAX_ABS_5M_PCT = float(os.environ.get("ADR_MAX_ABS_5M_PCT", "0.25"))          # ADR 5m quieto
 
-# Thresholds (strict by default)
-WATCH_MIN_DIFF_PCT = float(os.environ.get("WATCH_MIN_DIFF_PCT", "2.0"))
-WATCH_MIN_NET_USD_PER_CEDEAR = float(os.environ.get("WATCH_MIN_NET_USD_PER_CEDEAR", "0.50"))
-ADR_MAX_ABS_5M_PCT = float(os.environ.get("ADR_MAX_ABS_5M_PCT", "0.25"))
-
-# Target sizing (USD 300–500)
+# Target sizing
 TARGET_USD = float(os.environ.get("TARGET_USD", "500"))
 
-# Liquidity filter (ARS)
-MIN_MONTO_OPERADO_ARS = int(os.environ.get("MIN_MONTO_OPERADO_ARS", "50000000"))  # 50M ARS
+# Liquidity filters
+MIN_MONTO_OPERADO_ARS = int(os.environ.get("MIN_MONTO_OPERADO_ARS", "50000000"))  # 50M ARS default
 
-# Plazo (CI/T1/48)
+# Plazo (no mezclar CI vs 48)
 WATCH_PLAZO_TARGET = os.environ.get("WATCH_PLAZO_TARGET", "T1")
 
 # Allowed windows (ARG)
@@ -45,11 +44,8 @@ ALLOWED_WINDOWS = [
 ALERT_COOLDOWN_MIN = int(os.environ.get("ALERT_COOLDOWN_MIN", "20"))
 ALERT_EDGE_IMPROVE_USD = float(os.environ.get("ALERT_EDGE_IMPROVE_USD", "0.05"))
 
-# If enabled, do NOT send messages outside allowed windows
+# Guard
 WINDOW_GUARD_ENABLED = os.environ.get("WINDOW_GUARD_ENABLED", "1") == "1"
-
-# Reset beta sheet (run once with RESET_WATCHLIST_HISTORY=1 then back to 0)
-RESET_HISTORY = os.environ.get("RESET_WATCHLIST_HISTORY", "0") == "1"
 
 WATCHLIST_HISTORY_HEADER = [
     "date","time_arg","ticker","ratio",
@@ -63,12 +59,11 @@ WATCHLIST_HISTORY_HEADER = [
     "arb_side","arb_edge_net",
     "recommended_side","n_cedears_target",
     "min_book_ars","min_book_d",
-    "status","skip_reason",
-    "source"
+    "status","skip_reason","source"
 ]
 
 # =========================
-# TIME HELPERS
+# TIME
 # =========================
 def now_arg() -> datetime:
     return datetime.utcnow() - timedelta(hours=3)
@@ -109,6 +104,7 @@ def pick_mark_or_last(pq: dict) -> Optional[float]:
     return pq.get("last")
 
 def append_row_aligned(ws, header: list, row: list):
+    """Pad/truncate to header length to avoid column drift."""
     if len(row) < len(header):
         row = row + [""] * (len(header) - len(row))
     elif len(row) > len(header):
@@ -136,9 +132,6 @@ def is_executable_for_size(n: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d
     else:
         return (bid_qty_ars >= n) and (ask_qty_d >= n)
 
-def side_for_direction(arb_side: str) -> str:
-    return "COMPRA" if arb_side == "barato en ARS / caro en D" else "VENTA"
-
 def instruction_block(side: str) -> str:
     if side == "COMPRA":
         return "✅ BARATO en ARS / CARO en D → Comprá ARS → Vendé D"
@@ -152,6 +145,9 @@ def footer_instructions() -> str:
         "• Ejecutá la dirección indicada\n"
         "• Si en 30s se movió feo → cancelar/no operar\n"
     )
+
+def side_for_direction(arb_side: str) -> str:
+    return "COMPRA" if arb_side == "barato en ARS / caro en D" else "VENTA"
 
 # =========================
 # FX REF (MEP) via IOL
@@ -238,9 +234,17 @@ def upsert_alert_state(ws_state, state: Dict[str, Dict[str, Any]], ticker: str, 
         ws_state.append_row([t, side, iso, edge_net])
 
 # =========================
-# MAIN (Silent mode)
+# MAIN
 # =========================
 def main():
+    dt_arg = now_arg()
+    today = str(date.today())
+    hhmm = dt_arg.strftime("%H:%M")
+
+    # Guard: outside window => silent, no sheets, no telegram
+    if WINDOW_GUARD_ENABLED and (not in_allowed_window(dt_arg)):
+        return
+
     sheet = connect_sheets(SPREADSHEET_NAME)
 
     ws_hist = ensure_worksheet(
@@ -250,10 +254,6 @@ def main():
         rows=5000,
         cols=len(WATCHLIST_HISTORY_HEADER) + 5,
     )
-
-    if RESET_HISTORY:
-        ws_hist.clear()
-        ws_hist.append_row(WATCHLIST_HISTORY_HEADER, value_input_option="RAW")
 
     ws_state = ensure_worksheet(
         sheet,
@@ -269,42 +269,15 @@ def main():
 
     iol = IOLClient(os.environ["IOL_USERNAME"], os.environ["IOL_PASSWORD"])
 
-    dt_arg = now_arg()
-    today = str(date.today())
-    hhmm = dt_arg.strftime("%H:%M")
-
-    # ✅ NO ensuciar: si está fuera de ventana, salimos sin escribir nada
-    if WINDOW_GUARD_ENABLED and (not in_allowed_window(dt_arg)):
-        return
-
-    # ✅ HEARTBEAT solo dentro de ventana
-    append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
-        today, hhmm, "__HEARTBEAT__", "", "", "",
-        "", "", "", "", "", "",
-        "", "", "", "", "",
-        "", "", "",
-        "", "",
-        "", "",
-        "", "",
-        "", "",
-        "", "",
-        "OK", "",
-        "BOT"
-    ])
-
-    if WINDOW_GUARD_ENABLED and (not in_allowed_window(dt_arg)):
-        return
-
     mep_ref = get_mep_ref(iol, WATCH_PLAZO_TARGET)
     if not mep_ref:
-        return
+        return  # silent
 
     watchlist = get_all_records(sheet, WATCHLIST_SHEET)
-    if not watchlist:
-        return
 
     alerts_to_send: List[str] = []
     pending_state_updates: List[Tuple[str, str, float]] = []
+    rows_to_write: List[list] = []
 
     for w in watchlist:
         ticker = (w.get("ticker") or "").strip().upper()
@@ -313,12 +286,12 @@ def main():
         if not ticker or tipo != "CEDEAR":
             continue
 
-        # --- ARS quote ---
+        # ARS quote
         q_ars = iol.get_quote(IOL_MERCADO, ticker)
         if not q_ars:
             continue
-
         p_ars = parse_iol_quote(q_ars)
+
         bid = p_ars.get("bid")
         ask = p_ars.get("ask")
         bid_qty = int(p_ars.get("bid_qty") or 0)
@@ -333,7 +306,7 @@ def main():
         if monto_ars is not None and monto_ars < MIN_MONTO_OPERADO_ARS:
             continue
 
-        # --- D quote ---
+        # D quote
         ticker_d = (w.get("ticker_d") or "").strip().upper()
         sym_d = ticker_d if ticker_d else guess_d_symbol(ticker)
 
@@ -353,7 +326,7 @@ def main():
         if bid_d is None or ask_d is None:
             continue
 
-        # ADR proxy (NYSE)
+        # ADR proxy
         stock_usd = stock_usd_price(ticker)
         adr_5m = stock_usd_change_5m_pct(ticker)
         if stock_usd is None or adr_5m is None:
@@ -361,7 +334,7 @@ def main():
         if abs(adr_5m) > ADR_MAX_ABS_5M_PCT:
             continue
 
-        # Implicit vs MEP based on stock USD anchor
+        # Legacy implicit (anchor NY)
         ccl_buy = ccl_implicit(ask, stock_usd, ratio)
         ccl_sell = ccl_implicit(bid, stock_usd, ratio)
         if not ccl_buy or not ccl_sell:
@@ -374,7 +347,7 @@ def main():
         if not pack:
             continue
 
-        # ARS vs D relation (direction)
+        # ARS vs D direction
         price_ars_mark = (bid + ask) / 2.0
         price_d_mark = (bid_d + ask_d) / 2.0
 
@@ -395,14 +368,14 @@ def main():
 
         recommended_side = side_for_direction(arb_side)
 
-        # Target sizing & dynamic liquidity
+        # Size + liquidity for target
         n_cedears = required_cedears_for_target_usd(TARGET_USD, bid_d, ask_d, recommended_side)
         if not n_cedears:
             continue
 
         min_book_ars, min_book_d = min_qty_thresholds_for_target(n_cedears)
 
-        # Need both books healthy
+        # Need book depth both sides
         if bid_qty < min_book_ars or ask_qty < min_book_ars:
             continue
         if bid_qty_d < min_book_d or ask_qty_d < min_book_d:
@@ -410,14 +383,12 @@ def main():
         if not is_executable_for_size(n_cedears, bid_qty, ask_qty, bid_qty_d, ask_qty_d, recommended_side):
             continue
 
-        # Choose diff/edge that matches recommended direction (non-marginal)
+        # Enforce non-marginal opportunity using recommended side
         if recommended_side == "COMPRA":
-            side = "COMPRA"
             diff_pct = diff_buy
             edge_net = float(pack["edge_buy_net"])
             impl_show = ccl_buy
         else:
-            side = "VENTA"
             diff_pct = diff_sell
             edge_net = float(pack["edge_sell_net"])
             impl_show = ccl_sell
@@ -427,8 +398,8 @@ def main():
         if edge_net < WATCH_MIN_NET_USD_PER_CEDEAR:
             continue
 
-        # SAVE OK row only
-        append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, [
+        # Passed: prepare row write + alert
+        row = [
             today, hhmm, ticker, ratio,
             stock_usd, adr_5m,
             bid, ask, bid_qty, ask_qty, plazo_ars, monto_ars if monto_ars is not None else "",
@@ -438,35 +409,50 @@ def main():
             diff_buy, diff_sell,
             pack["edge_buy_net"], pack["edge_sell_net"],
             arb_side, arb_edge_net,
-            side, n_cedears,
+            recommended_side, n_cedears,
             min_book_ars, min_book_d,
-            "OK", "",
-            "IOL"
-        ])
+            "OK", "", "IOL"
+        ]
+        rows_to_write.append(row)
 
-        if should_send_alert(state, ticker, side, edge_net, dt_arg):
+        # Dedupe alerts
+        if should_send_alert(state, ticker, recommended_side, edge_net, dt_arg):
             alerts_to_send.append(
-                f"🔔 {ticker} — {side} FX\n"
-                f"{instruction_block(side)}\n"
+                f"🔔 {ticker} — {recommended_side} FX\n"
+                f"{instruction_block(recommended_side)}\n"
                 f"Impl: {impl_show:.0f} | MEP(AL30): {mep_ref:.0f} | {diff_pct:+.1f}% | {WATCH_PLAZO_TARGET}\n"
                 f"ADR 5m: {adr_5m:+.2f}% | {hhmm}\n"
                 f"Neto: {edge_net:.2f} USD/CEDEAR | ~{TARGET_USD:.0f} USD ⇒ {n_cedears} CEDEARs\n"
-                f"Book mínimo usado: ARS≥{min_book_ars} | D≥{min_book_d}"
+                f"Book mínimo: ARS≥{min_book_ars} | D≥{min_book_d}"
             )
-            pending_state_updates.append((ticker, side, edge_net))
+            pending_state_updates.append((ticker, recommended_side, edge_net))
 
-    # Silent: only send if there are real opportunities
-    if alerts_to_send:
-        msg = (
-            f"👀 Watchlist intradía — oportunidades FX\n"
-            f"MEP ref(AL30): {mep_ref:.0f} | {hhmm} (ARG)\n\n"
-            + "\n\n".join(alerts_to_send)
-            + footer_instructions()
-        )
-        send_telegram(msg)
+    # If no opportunities: do nothing (no sheets, no telegram)
+    if not alerts_to_send:
+        return
 
-        for t, side, edge in pending_state_updates:
-            upsert_alert_state(ws_state, state, t, side, edge, dt_arg)
+    # Write only rows for opportunities we are alerting on (optional: keep it strict)
+    # If you want strict = write only tickers that are in pending_state_updates:
+    allowed = set((t.upper(), s.upper()) for (t, s, _) in pending_state_updates)
+    for r in rows_to_write:
+        t = str(r[2]).upper()
+        side = str(r[26]).upper()  # recommended_side index in row
+        if (t, side) in allowed:
+            append_row_aligned(ws_hist, WATCHLIST_HISTORY_HEADER, r)
+
+    # Send Telegram
+    msg = (
+        f"👀 Watchlist intradía — oportunidades FX\n"
+        f"MEP ref(AL30): {mep_ref:.0f} | {hhmm} (ARG)\n\n"
+        + "\n\n".join(alerts_to_send)
+        + footer_instructions()
+    )
+    send_telegram(msg)
+
+    # Update state
+    for t, side, edge in pending_state_updates:
+        upsert_alert_state(ws_state, state, t, side, edge, dt_arg)
+
 
 if __name__ == "__main__":
     main()
