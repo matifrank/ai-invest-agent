@@ -28,6 +28,7 @@ MIN_TOP_QTY_ARS = int(os.environ.get("MIN_TOP_QTY_ARS", "1"))
 MIN_TOP_QTY_D = int(os.environ.get("MIN_TOP_QTY_D", "1"))
 
 USE_TIME_WINDOW = os.environ.get("USE_TIME_WINDOW", "0") == "1"
+TOP_N_ALERTS = int(os.environ.get("TOP_N_ALERTS", "3"))
 
 ALLOWED_WINDOWS = [
     (11, 0, 13, 0),
@@ -150,13 +151,6 @@ def min_qty_thresholds_for_target(n: int) -> Tuple[int, int]:
     if not n or n <= 0:
         return (1, 1)
     return (max(MIN_TOP_QTY_ARS, n), max(MIN_TOP_QTY_D, n))
-
-def is_executable_for_size(n: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int, side: str) -> bool:
-    if not n or n <= 0:
-        return False
-    if side == "COMPRA":
-        return ask_qty_ars >= n and bid_qty_d >= n
-    return bid_qty_ars >= n and ask_qty_d >= n
 
 def executable_qty(n_target: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int, side: str) -> int:
     if not n_target or n_target <= 0:
@@ -333,7 +327,7 @@ def main():
     today = str(date.today())
     hhmm = hhmm_arg()
 
-    watch_opps: List[Tuple[float, str]] = []
+    watch_opps: List[Tuple[float, str, list]] = []
 
     for w in watchlist:
         ticker = (w.get("ticker") or "").strip().upper()
@@ -406,11 +400,7 @@ def main():
             if n_target:
                 min_book_ars, min_book_d = min_qty_thresholds_for_target(n_target)
                 n_exec = executable_qty(n_target, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, "COMPRA")
-                if (
-                    bid_qty_ars >= MIN_TOP_QTY_ARS and ask_qty_ars >= MIN_TOP_QTY_ARS and
-                    bid_qty_d >= MIN_TOP_QTY_D and ask_qty_d >= MIN_TOP_QTY_D and
-                    n_exec > 0
-                ):
+                if n_exec > 0:
                     recommended_side = "COMPRA"
                     diff_pct = diff_buy_pct
                     edge_net = edge_buy_net
@@ -422,11 +412,7 @@ def main():
             if n_target:
                 min_book_ars, min_book_d = min_qty_thresholds_for_target(n_target)
                 n_exec = executable_qty(n_target, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, "VENTA")
-                if (
-                    bid_qty_ars >= MIN_TOP_QTY_ARS and ask_qty_ars >= MIN_TOP_QTY_ARS and
-                    bid_qty_d >= MIN_TOP_QTY_D and ask_qty_d >= MIN_TOP_QTY_D and
-                    n_exec > 0
-                ):
+                if n_exec > 0:
                     recommended_side = "VENTA"
                     diff_pct = diff_sell_pct
                     edge_net = edge_sell_net
@@ -446,8 +432,9 @@ def main():
             ask_qty_d=ask_qty_d,
         )
 
-        # guarda oportunidad
-        append_row_aligned(ws_watch_hist, WATCHLIST_HISTORY_HEADER, [
+        usd_trade_exec = edge_net * n_exec if n_exec else 0.0
+
+        row = [
             today, hhmm, ticker, sym_d, ratio,
             bid_ars, ask_ars, bid_qty_ars, ask_qty_ars, monto_ars if monto_ars is not None else "", plazo_ars,
             bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
@@ -461,9 +448,7 @@ def main():
             n_target, n_exec, min_book_ars, min_book_d,
             price_ars, price_d,
             flag, "IOL"
-        ])
-
-        usd_trade_exec = edge_net * n_exec if n_exec else 0.0
+        ]
 
         if recommended_side == "COMPRA":
             side_text = "Comprá ARS → Vendé D"
@@ -484,8 +469,7 @@ def main():
                 f"- Vender {ticker} {n_exec} @ {price_ars:.2f} {label_ars}"
             )
 
-        watch_opps.append((
-            usd_trade_exec,
+        msg_item = (
             f"{flag} ⚡ {ticker} {recommended_side}\n"
             f"{side_text}\n\n"
             f"📍 ARS: {price_ars:.2f} ({label_ars})\n"
@@ -497,21 +481,27 @@ def main():
             f"≈ {usd_trade_exec:.2f} USD total ejecutable\n\n"
             f"{order_text}\n\n"
             f"book ARS {bid_qty_ars}/{ask_qty_ars} | D {bid_qty_d}/{ask_qty_d}"
-        ))
+        )
 
-    if watch_opps:
-        msg = f"👀 Watchlist oportunidades ARS vs D\nCCL mkt: {ccl_mkt:.0f} | {hhmm}\n\n"
-        watch_opps_sorted = sorted(watch_opps, key=lambda x: x[0], reverse=True)
-        
-        formatted = []
-        for i, (_, msg_item) in enumerate(watch_opps_sorted, start=1):
-            formatted.append(f"#{i}\n{msg_item}")
-        
-        msg += "\n\n".join(formatted)
-        msg += "\n\nPipeline funcionando 🤖"
-        send_telegram(msg)
-    else:
+        watch_opps.append((usd_trade_exec, msg_item, row))
+
+    if not watch_opps:
         print("No watchlist opportunities today")
+        return
+
+    watch_opps_sorted = sorted(watch_opps, key=lambda x: x[0], reverse=True)[:TOP_N_ALERTS]
+
+    for _, _, row in watch_opps_sorted:
+        append_row_aligned(ws_watch_hist, WATCHLIST_HISTORY_HEADER, row)
+
+    msg = f"👀 Watchlist oportunidades ARS vs D\nCCL mkt: {ccl_mkt:.0f} | {hhmm}\n\n"
+    formatted = []
+    for i, (_, msg_item, _) in enumerate(watch_opps_sorted, start=1):
+        formatted.append(f"#{i}\n{msg_item}")
+    msg += "\n\n".join(formatted)
+    msg += "\n\nPipeline funcionando 🤖"
+
+    send_telegram(msg)
 
 if __name__ == "__main__":
     main()
