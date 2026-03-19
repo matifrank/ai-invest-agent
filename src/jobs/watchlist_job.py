@@ -34,6 +34,11 @@ ALLOWED_WINDOWS = [
     (16, 0, 17, 0),
 ]
 
+FLAG_STRONG_EDGE_USD = float(os.environ.get("FLAG_STRONG_EDGE_USD", "0.50"))
+FLAG_STRONG_DIFF_PCT = float(os.environ.get("FLAG_STRONG_DIFF_PCT", "2.5"))
+FLAG_ULTRA_EDGE_USD = float(os.environ.get("FLAG_ULTRA_EDGE_USD", "1.50"))
+FLAG_ULTRA_DIFF_PCT = float(os.environ.get("FLAG_ULTRA_DIFF_PCT", "4.0"))
+
 WATCHLIST_HISTORY_HEADER = [
     "date", "time_arg", "ticker", "ticker_d", "ratio",
     "bid_ars", "ask_ars", "bid_qty_ars", "ask_qty_ars", "monto_ars", "plazo_ars",
@@ -44,7 +49,9 @@ WATCHLIST_HISTORY_HEADER = [
     "edge_buy_gross", "edge_sell_gross",
     "fee_buy_usd_rt", "fee_sell_usd_rt",
     "edge_buy_net", "edge_sell_net",
-    "recommended_side", "n_target", "min_book_ars", "min_book_d",
+    "recommended_side",
+    "n_target", "n_executable", "min_book_ars", "min_book_d",
+    "price_ars", "price_d",
     "flag", "source"
 ]
 
@@ -151,16 +158,23 @@ def is_executable_for_size(n: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d
         return ask_qty_ars >= n and bid_qty_d >= n
     return bid_qty_ars >= n and ask_qty_d >= n
 
-def opportunity_flag(edge_net: float, diff_pct: float, n_cedears: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int) -> str:
+def executable_qty(n_target: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int, side: str) -> int:
+    if not n_target or n_target <= 0:
+        return 0
+    if side == "COMPRA":
+        return min(n_target, ask_qty_ars, bid_qty_d)
+    return min(n_target, bid_qty_ars, ask_qty_d)
+
+def opportunity_flag(edge_net: float, diff_pct: float, n_executable: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int) -> str:
     ultra_liq = (
-        bid_qty_ars >= 4 * n_cedears and
-        ask_qty_ars >= 4 * n_cedears and
-        bid_qty_d >= 4 * n_cedears and
-        ask_qty_d >= 4 * n_cedears
+        bid_qty_ars >= 4 * max(n_executable, 1) and
+        ask_qty_ars >= 4 * max(n_executable, 1) and
+        bid_qty_d >= 4 * max(n_executable, 1) and
+        ask_qty_d >= 4 * max(n_executable, 1)
     )
-    if edge_net >= 1.50 and abs(diff_pct) >= 4.0 and ultra_liq:
+    if edge_net >= FLAG_ULTRA_EDGE_USD and abs(diff_pct) >= FLAG_ULTRA_DIFF_PCT and ultra_liq:
         return "🔥 ULTRA"
-    if edge_net >= 0.50 or abs(diff_pct) >= 2.5:
+    if edge_net >= FLAG_STRONG_EDGE_USD or abs(diff_pct) >= FLAG_STRONG_DIFF_PCT:
         return "🟢 STRONG"
     return "🟡 MEDIUM"
 
@@ -293,7 +307,7 @@ def send_telegram(msg: str):
 # MAIN
 # =========================
 def main():
-    print("🚀 Iniciando watchlist standalone")
+    print("🚀 Iniciando watchlist standalone refinado")
 
     if not in_allowed_window():
         print("⏱ Fuera de ventana operativa.")
@@ -365,13 +379,13 @@ def main():
         if usd_ars_bid is None or usd_ars_ask is None:
             continue
 
-        # COMPRA FX: comprá ARS al ask, vendé D al bid
+        # COMPRA FX: comprás ARS al ask, vendés D al bid
         diff_buy_pct = ((bid_d - usd_ars_ask) / usd_ars_ask) * 100 if usd_ars_ask > 0 else None
         edge_buy_gross = bid_d - usd_ars_ask
         fee_buy = fee_roundtrip_usd(usd_ars_ask, BROKER_FEE_PCT) or 0.0
         edge_buy_net = edge_buy_gross - fee_buy
 
-        # VENTA FX: vendé ARS al bid, comprá D al ask
+        # VENTA FX: comprás D al ask, vendés ARS al bid
         diff_sell_pct = ((usd_ars_bid - ask_d) / ask_d) * 100 if ask_d > 0 else None
         edge_sell_gross = usd_ars_bid - ask_d
         fee_sell = fee_roundtrip_usd(usd_ars_bid, BROKER_FEE_PCT) or 0.0
@@ -381,48 +395,58 @@ def main():
         diff_pct = None
         edge_net = None
         n_target = None
+        n_exec = 0
         min_book_ars = None
         min_book_d = None
+        price_ars = None
+        price_d = None
 
         if diff_buy_pct is not None and diff_buy_pct >= WATCH_MIN_DIFF_PCT and edge_buy_net >= WATCH_MIN_NET_USD_PER_CEDEAR:
             n_target = required_cedears_for_target_usd(TARGET_USD, bid_d, ask_d, "COMPRA")
             if n_target:
                 min_book_ars, min_book_d = min_qty_thresholds_for_target(n_target)
+                n_exec = executable_qty(n_target, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, "COMPRA")
                 if (
                     bid_qty_ars >= MIN_TOP_QTY_ARS and ask_qty_ars >= MIN_TOP_QTY_ARS and
                     bid_qty_d >= MIN_TOP_QTY_D and ask_qty_d >= MIN_TOP_QTY_D and
-                    is_executable_for_size(n_target, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, "COMPRA")
+                    n_exec > 0
                 ):
                     recommended_side = "COMPRA"
                     diff_pct = diff_buy_pct
                     edge_net = edge_buy_net
+                    price_ars = ask_ars
+                    price_d = bid_d
 
         if not recommended_side and diff_sell_pct is not None and diff_sell_pct >= WATCH_MIN_DIFF_PCT and edge_sell_net >= WATCH_MIN_NET_USD_PER_CEDEAR:
             n_target = required_cedears_for_target_usd(TARGET_USD, bid_d, ask_d, "VENTA")
             if n_target:
                 min_book_ars, min_book_d = min_qty_thresholds_for_target(n_target)
+                n_exec = executable_qty(n_target, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, "VENTA")
                 if (
                     bid_qty_ars >= MIN_TOP_QTY_ARS and ask_qty_ars >= MIN_TOP_QTY_ARS and
                     bid_qty_d >= MIN_TOP_QTY_D and ask_qty_d >= MIN_TOP_QTY_D and
-                    is_executable_for_size(n_target, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, "VENTA")
+                    n_exec > 0
                 ):
                     recommended_side = "VENTA"
                     diff_pct = diff_sell_pct
                     edge_net = edge_sell_net
+                    price_ars = bid_ars
+                    price_d = ask_d
 
-        if not recommended_side:
+        if not recommended_side or not n_target or n_exec <= 0:
             continue
 
         flag = opportunity_flag(
             edge_net=edge_net,
             diff_pct=diff_pct,
-            n_cedears=n_target,
+            n_executable=n_exec,
             bid_qty_ars=bid_qty_ars,
             ask_qty_ars=ask_qty_ars,
             bid_qty_d=bid_qty_d,
             ask_qty_d=ask_qty_d,
         )
 
+        # guarda oportunidad
         append_row_aligned(ws_watch_hist, WATCHLIST_HISTORY_HEADER, [
             today, hhmm, ticker, sym_d, ratio,
             bid_ars, ask_ars, bid_qty_ars, ask_qty_ars, monto_ars if monto_ars is not None else "", plazo_ars,
@@ -433,27 +457,57 @@ def main():
             edge_buy_gross, edge_sell_gross,
             fee_buy, fee_sell,
             edge_buy_net, edge_sell_net,
-            recommended_side, n_target, min_book_ars, min_book_d,
+            recommended_side,
+            n_target, n_exec, min_book_ars, min_book_d,
+            price_ars, price_d,
             flag, "IOL"
         ])
 
-        usd_trade = edge_net * n_target if n_target else 0.0
-        side_text = "Comprá ARS → Vendé D" if recommended_side == "COMPRA" else "Comprá D → Vendé ARS"
+        usd_trade_exec = edge_net * n_exec if n_exec else 0.0
+
+        if recommended_side == "COMPRA":
+            side_text = "Comprá ARS → Vendé D"
+            label_ars = "ASK"
+            label_d = "BID"
+            order_text = (
+                f"Orden sugerida:\n"
+                f"- Comprar {ticker} {n_exec} @ {price_ars:.2f} {label_ars}\n"
+                f"- Vender {sym_d} {n_exec} @ {price_d:.2f} {label_d}"
+            )
+        else:
+            side_text = "Comprá D → Vendé ARS"
+            label_ars = "BID"
+            label_d = "ASK"
+            order_text = (
+                f"Orden sugerida:\n"
+                f"- Comprar {sym_d} {n_exec} @ {price_d:.2f} {label_d}\n"
+                f"- Vender {ticker} {n_exec} @ {price_ars:.2f} {label_ars}"
+            )
 
         watch_opps.append((
-            edge_net,
+            usd_trade_exec,
             f"{flag} ⚡ {ticker} {recommended_side}\n"
-            f"{side_text}\n"
+            f"{side_text}\n\n"
+            f"📍 ARS: {price_ars:.2f} ({label_ars})\n"
+            f"📍 USD: {price_d:.2f} ({label_d})\n\n"
+            f"Qty objetivo: {n_target} CEDEAR\n"
+            f"Qty ejecutable ahora: {n_exec} CEDEAR\n"
             f"diff {diff_pct:+.2f}%\n"
             f"edge {edge_net:.2f} USD/CEDEAR\n"
-            f"≈ {usd_trade:.2f} USD por {n_target} CEDEAR\n"
+            f"≈ {usd_trade_exec:.2f} USD total ejecutable\n\n"
+            f"{order_text}\n\n"
             f"book ARS {bid_qty_ars}/{ask_qty_ars} | D {bid_qty_d}/{ask_qty_d}"
         ))
 
     if watch_opps:
         msg = f"👀 Watchlist oportunidades ARS vs D\nCCL mkt: {ccl_mkt:.0f} | {hhmm}\n\n"
-        watch_opps_sorted = [m for _, m in sorted(watch_opps, key=lambda x: x[0], reverse=True)]
-        msg += "\n\n".join(watch_opps_sorted)
+        watch_opps_sorted = sorted(watch_opps, key=lambda x: x[0], reverse=True)
+        
+        formatted = []
+        for i, (_, msg_item) in enumerate(watch_opps_sorted, start=1):
+            formatted.append(f"#{i}\n{msg_item}")
+        
+        msg += "\n\n".join(formatted)
         msg += "\n\nPipeline funcionando 🤖"
         send_telegram(msg)
     else:
