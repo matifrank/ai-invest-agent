@@ -21,6 +21,7 @@ BROKER_FEE_PCT = float(os.environ.get("BROKER_FEE_PCT", "0.5"))
 WATCH_MIN_DIFF_PCT = float(os.environ.get("WATCH_MIN_DIFF_PCT", "1.0"))
 WATCH_MIN_NET_USD_PER_CEDEAR = float(os.environ.get("WATCH_MIN_NET_USD_PER_CEDEAR", "0.12"))
 MIN_EXEC_QTY = int(os.environ.get("MIN_EXEC_QTY", "5"))
+MIN_BUFFER_RATIO = float(os.environ.get("MIN_BUFFER_RATIO", "1.2"))
 
 PENDING_TRADES_HEADER = [
     "trade_id",
@@ -75,6 +76,7 @@ def get_all_records(sheet, tab_name: str) -> List[Dict[str, Any]]:
 
 
 def update_pending_trade_status(ws, row_idx: int, status: str, reason: str = ""):
+    # N:O => status, reason
     ws.update(f"N{row_idx}:O{row_idx}", [[status, reason]])
 
 
@@ -120,8 +122,22 @@ def executable_qty(n_target: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d:
     if not n_target or n_target <= 0:
         return 0
     if side == "COMPRA":
+        # comprar ARS al ask, vender D al bid
         return min(n_target, ask_qty_ars, bid_qty_d)
+    # comprar D al ask, vender ARS al bid
     return min(n_target, bid_qty_ars, ask_qty_d)
+
+
+def execution_buffer_ratio(side: str, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int, n_exec: int) -> float:
+    if n_exec <= 0:
+        return 0.0
+
+    if side == "COMPRA":
+        relevant_min = min(ask_qty_ars, bid_qty_d)
+    else:
+        relevant_min = min(bid_qty_ars, ask_qty_d)
+
+    return relevant_min / n_exec
 
 
 # =========================
@@ -244,7 +260,7 @@ def live_execute_stub(trade_id: str, action_text: str):
 # =========================
 def process_trade(trade_id: str, mode: str):
     print(f"🚀 Processing trade_id={trade_id} | mode={mode}")
-    
+
     sheet = connect_sheets()
     ws_pending = ensure_worksheet(sheet, PENDING_TRADES_SHEET, header=PENDING_TRADES_HEADER)
 
@@ -312,12 +328,14 @@ def process_trade(trade_id: str, mode: str):
         fee = fee_roundtrip_usd(usd_ars_ask, BROKER_FEE_PCT) or 0.0
         edge_now = edge_gross - fee
         qty_exec_now = executable_qty(qty_target, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, side)
+        buffer_ratio = execution_buffer_ratio(side, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, qty_exec_now)
 
         gross_ars_now = ask_ars * qty_exec_now
         gross_usd_now = bid_d * qty_exec_now
 
         still_valid = (
             qty_exec_now >= MIN_EXEC_QTY and
+            buffer_ratio >= MIN_BUFFER_RATIO and
             diff_now is not None and diff_now >= WATCH_MIN_DIFF_PCT and
             edge_now >= WATCH_MIN_NET_USD_PER_CEDEAR
         )
@@ -341,12 +359,14 @@ def process_trade(trade_id: str, mode: str):
         fee = fee_roundtrip_usd(usd_ars_bid, BROKER_FEE_PCT) or 0.0
         edge_now = edge_gross - fee
         qty_exec_now = executable_qty(qty_target, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, side)
+        buffer_ratio = execution_buffer_ratio(side, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, qty_exec_now)
 
         gross_ars_now = bid_ars * qty_exec_now
         gross_usd_now = ask_d * qty_exec_now
 
         still_valid = (
             qty_exec_now >= MIN_EXEC_QTY and
+            buffer_ratio >= MIN_BUFFER_RATIO and
             diff_now is not None and diff_now >= WATCH_MIN_DIFF_PCT and
             edge_now >= WATCH_MIN_NET_USD_PER_CEDEAR
         )
@@ -367,6 +387,7 @@ def process_trade(trade_id: str, mode: str):
             f"Ticker: {ticker}\n"
             f"Lado: {side}\n"
             f"Qty ejecutable ahora: {qty_exec_now}\n"
+            f"buffer liquidez: {buffer_ratio:.2f}x\n"
             f"Diff ahora: {diff_now if diff_now is not None else 'N/A'}\n"
             f"Edge ahora: {edge_now:.2f} USD/CEDEAR\n\n"
             f"La oportunidad ya no está lo suficientemente buena."
@@ -385,6 +406,7 @@ def process_trade(trade_id: str, mode: str):
             f"Diff ahora: {diff_now:+.2f}%\n"
             f"Edge original: {ref_edge:.2f} USD/CEDEAR\n"
             f"Edge ahora: {edge_now:.2f} USD/CEDEAR\n"
+            f"buffer liquidez: {buffer_ratio:.2f}x\n"
             f"≈ {usd_trade_exec_now:.2f} USD total ejecutable\n\n"
             f"Orden sugerida ahora:\n{action_text}"
         )

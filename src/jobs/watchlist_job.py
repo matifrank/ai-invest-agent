@@ -31,7 +31,7 @@ MIN_TOP_QTY_D = int(os.environ.get("MIN_TOP_QTY_D", "1"))
 MIN_EXEC_QTY = int(os.environ.get("MIN_EXEC_QTY", "5"))
 
 USE_TIME_WINDOW = os.environ.get("USE_TIME_WINDOW", "0") == "1"
-TOP_N_ALERTS = int(os.environ.get("TOP_N_ALERTS", "3"))
+TOP_N_ALERTS = int(os.environ.get("TOP_N_ALERTS", "2"))
 
 FLAG_STRONG_EDGE_USD = float(os.environ.get("FLAG_STRONG_EDGE_USD", "0.50"))
 FLAG_STRONG_DIFF_PCT = float(os.environ.get("FLAG_STRONG_DIFF_PCT", "2.5"))
@@ -40,6 +40,8 @@ FLAG_ULTRA_DIFF_PCT = float(os.environ.get("FLAG_ULTRA_DIFF_PCT", "4.0"))
 
 MEP_CCL_DIVERGENCE_ALERT_PCT = float(os.environ.get("MEP_CCL_DIVERGENCE_ALERT_PCT", "1.0"))
 PENDING_TRADE_TTL_MIN = int(os.environ.get("PENDING_TRADE_TTL_MIN", "10"))
+MIN_BUFFER_RATIO = float(os.environ.get("MIN_BUFFER_RATIO", "1.2"))
+MAX_BUFFER_BONUS = float(os.environ.get("MAX_BUFFER_BONUS", "1.5"))
 
 ALLOWED_WINDOWS = [
     (11, 0, 13, 0),
@@ -60,7 +62,7 @@ WATCHLIST_HISTORY_HEADER = [
     "n_target", "n_executable", "min_book_ars", "min_book_d",
     "price_ars", "price_d",
     "gross_ars", "gross_usd",
-    "usd_trade_exec", "score",
+    "usd_trade_exec", "buffer_ratio", "score",
     "flag", "trade_id", "source"
 ]
 
@@ -203,6 +205,18 @@ def executable_qty(n_target: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d:
     return min(n_target, bid_qty_ars, ask_qty_d)
 
 
+def execution_buffer_ratio(side: str, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int, n_exec: int) -> float:
+    if n_exec <= 0:
+        return 0.0
+
+    if side == "COMPRA":
+        relevant_min = min(ask_qty_ars, bid_qty_d)
+    else:
+        relevant_min = min(bid_qty_ars, ask_qty_d)
+
+    return relevant_min / n_exec
+
+
 def opportunity_flag(edge_net: float, diff_pct: float, n_executable: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int) -> str:
     ultra_liq = (
         bid_qty_ars >= 4 * max(n_executable, 1) and
@@ -217,11 +231,12 @@ def opportunity_flag(edge_net: float, diff_pct: float, n_executable: int, bid_qt
     return "🟡 MEDIUM"
 
 
-def opportunity_score(usd_trade_exec: float, n_exec: int, n_target: int) -> float:
+def opportunity_score(usd_trade_exec: float, n_exec: int, n_target: int, buffer_ratio: float) -> float:
     if not n_target or n_target <= 0:
         return 0.0
     fill_ratio = min(1.0, n_exec / n_target)
-    return usd_trade_exec * fill_ratio
+    buffer_bonus = min(MAX_BUFFER_BONUS, buffer_ratio)
+    return usd_trade_exec * fill_ratio * buffer_bonus
 
 
 # =========================
@@ -440,13 +455,13 @@ def main():
         if usd_ars_bid is None or usd_ars_ask is None:
             continue
 
-        # ARS -> D
+        # COMPRA: ARS -> D
         diff_buy_pct = ((bid_d - usd_ars_ask) / usd_ars_ask) * 100 if usd_ars_ask > 0 else None
         edge_buy_gross = bid_d - usd_ars_ask
         fee_buy = fee_roundtrip_usd(usd_ars_ask, BROKER_FEE_PCT) or 0.0
         edge_buy_net = edge_buy_gross - fee_buy
 
-        # D -> ARS
+        # VENTA: D -> ARS
         diff_sell_pct = ((usd_ars_bid - ask_d) / ask_d) * 100 if ask_d > 0 else None
         edge_sell_gross = usd_ars_bid - ask_d
         fee_sell = fee_roundtrip_usd(usd_ars_bid, BROKER_FEE_PCT) or 0.0
@@ -497,8 +512,21 @@ def main():
         if not recommended_side or not n_target or n_exec < MIN_EXEC_QTY:
             continue
 
+        buffer_ratio = execution_buffer_ratio(
+            recommended_side,
+            bid_qty_ars,
+            ask_qty_ars,
+            bid_qty_d,
+            ask_qty_d,
+            n_exec,
+        )
+
+        if buffer_ratio < MIN_BUFFER_RATIO:
+            continue
+
         usd_trade_exec = edge_net * n_exec
-        score = opportunity_score(usd_trade_exec, n_exec, n_target)
+        score = opportunity_score(usd_trade_exec, n_exec, n_target, buffer_ratio)
+
         flag = opportunity_flag(
             edge_net=edge_net,
             diff_pct=diff_pct,
@@ -529,7 +557,7 @@ def main():
             n_target, n_exec, min_book_ars, min_book_d,
             price_ars, price_d,
             gross_ars, gross_usd,
-            usd_trade_exec, score,
+            usd_trade_exec, buffer_ratio, score,
             flag, trade_id, "IOL"
         ]
 
@@ -584,6 +612,7 @@ def main():
             f"diff {diff_pct:+.2f}%\n"
             f"edge {edge_net:.2f} USD/CEDEAR\n"
             f"≈ {usd_trade_exec:.2f} USD total ejecutable\n"
+            f"buffer liquidez {buffer_ratio:.2f}x\n"
             f"score {score:.2f}\n\n"
             f"{order_text}\n\n"
             f"book ARS {bid_qty_ars}/{ask_qty_ars} | D {bid_qty_d}/{ask_qty_d}\n\n"

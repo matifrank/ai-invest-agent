@@ -79,6 +79,7 @@ jobs:
           WATCH_MIN_DIFF_PCT: "1.0"
           WATCH_MIN_NET_USD_PER_CEDEAR: "0.12"
           MIN_EXEC_QTY: "5"
+          MIN_BUFFER_RATIO: "1.2"
 
   blocked:
     needs: validate
