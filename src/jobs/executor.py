@@ -2,11 +2,10 @@ import os
 import sys
 import json
 import time
-import math
 import requests
 import gspread
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 from oauth2client.service_account import ServiceAccountCredentials
 
 # =========================
@@ -55,6 +54,7 @@ def connect_sheets():
     client = gspread.authorize(creds)
     return client.open(SPREADSHEET_NAME)
 
+
 def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 20, header: Optional[List[str]] = None):
     try:
         ws = sheet.worksheet(title)
@@ -69,12 +69,14 @@ def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 20, header
             ws.update("1:1", [header])
     return ws
 
+
 def get_all_records(sheet, tab_name: str) -> List[Dict[str, Any]]:
     return sheet.worksheet(tab_name).get_all_records()
 
+
 def update_pending_trade_status(ws, row_idx: int, status: str, reason: str = ""):
-    # columns N:O = status, reason
     ws.update(f"N{row_idx}:O{row_idx}", [[status, reason]])
+
 
 def find_pending_trade(sheet, trade_id: str):
     rows = get_all_records(sheet, PENDING_TRADES_SHEET)
@@ -83,11 +85,13 @@ def find_pending_trade(sheet, trade_id: str):
             return i, r
     return None, None
 
+
 # =========================
-# UTILS
+# TIME / UTILS
 # =========================
 def now_arg() -> datetime:
     return datetime.utcnow() - timedelta(hours=3)
+
 
 def safe_float(x) -> Optional[float]:
     try:
@@ -99,15 +103,18 @@ def safe_float(x) -> Optional[float]:
     except:
         return None
 
+
 def fee_roundtrip_usd(usd_base: float, fee_pct_per_tx: float) -> Optional[float]:
     if usd_base is None:
         return None
     return usd_base * ((2 * fee_pct_per_tx) / 100.0)
 
+
 def usd_per_cedear(price_ars: float, ccl_mkt: float) -> Optional[float]:
     if not price_ars or not ccl_mkt or ccl_mkt <= 0:
         return None
     return price_ars / ccl_mkt
+
 
 def executable_qty(n_target: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int, side: str) -> int:
     if not n_target or n_target <= 0:
@@ -115,6 +122,7 @@ def executable_qty(n_target: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d:
     if side == "COMPRA":
         return min(n_target, ask_qty_ars, bid_qty_d)
     return min(n_target, bid_qty_ars, ask_qty_d)
+
 
 # =========================
 # IOL
@@ -186,6 +194,7 @@ class IOLClient:
         except:
             return None
 
+
 def parse_iol_quote_full(q: Dict[str, Any]) -> Dict[str, Any]:
     plazo = q.get("plazo")
     bid = None
@@ -208,6 +217,7 @@ def parse_iol_quote_full(q: Dict[str, Any]) -> Dict[str, Any]:
         "plazo": plazo,
     }
 
+
 # =========================
 # TELEGRAM
 # =========================
@@ -217,10 +227,24 @@ def send_telegram(msg: str):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     requests.post(url, json={"chat_id": chat_id, "text": msg}, timeout=10)
 
+
 # =========================
-# DRY RUN
+# LIVE STUB
 # =========================
-def dry_run_trade(trade_id: str):
+def live_execute_stub(trade_id: str, action_text: str):
+    send_telegram(
+        f"🟡 LIVE STUB: {trade_id}\n\n"
+        f"Aún no hay envío real de órdenes a IOL.\n"
+        f"Esto sería lo que se ejecutaría:\n\n{action_text}"
+    )
+
+
+# =========================
+# EXECUTION
+# =========================
+def process_trade(trade_id: str, mode: str):
+    print(f"🚀 Processing trade_id={trade_id} | mode={mode}")
+    
     sheet = connect_sheets()
     ws_pending = ensure_worksheet(sheet, PENDING_TRADES_SHEET, header=PENDING_TRADES_HEADER)
 
@@ -255,9 +279,9 @@ def dry_run_trade(trade_id: str):
     ccl_mkt = safe_float(trade.get("ccl_mkt"))
 
     iol = IOLClient(os.environ["IOL_USERNAME"], os.environ["IOL_PASSWORD"])
-
     q_ars = iol.get_quote(IOL_MERCADO, ticker)
     q_d = iol.get_quote(IOL_MERCADO, ticker_d)
+
     if not q_ars or not q_d:
         update_pending_trade_status(ws_pending, row_idx, "REJECTED", "quotes_missing")
         send_telegram(f"❌ Sin quotes actuales: {trade_id}")
@@ -277,7 +301,6 @@ def dry_run_trade(trade_id: str):
     ask_qty_d = d["ask_qty"]
 
     if side == "COMPRA":
-        # Comprar ARS al ask, vender D al bid
         if ask_ars is None or bid_d is None:
             update_pending_trade_status(ws_pending, row_idx, "REJECTED", "missing_revalidation_prices")
             send_telegram(f"❌ Faltan precios para revalidar: {trade_id}")
@@ -290,9 +313,10 @@ def dry_run_trade(trade_id: str):
         edge_now = edge_gross - fee
         qty_exec_now = executable_qty(qty_target, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, side)
 
+        gross_ars_now = ask_ars * qty_exec_now
+        gross_usd_now = bid_d * qty_exec_now
+
         still_valid = (
-            ask_ars <= ref_price_ars and
-            bid_d >= ref_price_d and
             qty_exec_now >= MIN_EXEC_QTY and
             diff_now is not None and diff_now >= WATCH_MIN_DIFF_PCT and
             edge_now >= WATCH_MIN_NET_USD_PER_CEDEAR
@@ -300,12 +324,13 @@ def dry_run_trade(trade_id: str):
 
         action_text = (
             f"- Comprar {ticker} {qty_exec_now} @ {ask_ars:.2f} ASK\n"
-            f"- Vender {ticker_d} {qty_exec_now} @ {bid_d:.2f} BID"
+            f"  Total compra ARS: {gross_ars_now:,.2f}\n"
+            f"- Vender {ticker_d} {qty_exec_now} @ {bid_d:.2f} BID\n"
+            f"  Total venta USD: {gross_usd_now:,.2f}"
         )
 
     else:
-        # Comprar D al ask, vender ARS al bid
-        if ask_d is None or bid_ars is None:
+        if bid_ars is None or ask_d is None:
             update_pending_trade_status(ws_pending, row_idx, "REJECTED", "missing_revalidation_prices")
             send_telegram(f"❌ Faltan precios para revalidar: {trade_id}")
             return
@@ -317,9 +342,10 @@ def dry_run_trade(trade_id: str):
         edge_now = edge_gross - fee
         qty_exec_now = executable_qty(qty_target, bid_qty_ars, ask_qty_ars, bid_qty_d, ask_qty_d, side)
 
+        gross_ars_now = bid_ars * qty_exec_now
+        gross_usd_now = ask_d * qty_exec_now
+
         still_valid = (
-            bid_ars >= ref_price_ars and
-            ask_d <= ref_price_d and
             qty_exec_now >= MIN_EXEC_QTY and
             diff_now is not None and diff_now >= WATCH_MIN_DIFF_PCT and
             edge_now >= WATCH_MIN_NET_USD_PER_CEDEAR
@@ -327,13 +353,28 @@ def dry_run_trade(trade_id: str):
 
         action_text = (
             f"- Comprar {ticker_d} {qty_exec_now} @ {ask_d:.2f} ASK\n"
-            f"- Vender {ticker} {qty_exec_now} @ {bid_ars:.2f} BID"
+            f"  Total compra USD: {gross_usd_now:,.2f}\n"
+            f"- Vender {ticker} {qty_exec_now} @ {bid_ars:.2f} BID\n"
+            f"  Total venta ARS: {gross_ars_now:,.2f}"
         )
 
     usd_trade_exec_now = edge_now * qty_exec_now if qty_exec_now > 0 else 0.0
 
-    if still_valid:
-        msg = (
+    if not still_valid:
+        update_pending_trade_status(ws_pending, row_idx, "REJECTED", "revalidation_failed")
+        send_telegram(
+            f"❌ {'DRY RUN' if mode == 'dry_run' else 'EXEC'} REJECTED: {trade_id}\n\n"
+            f"Ticker: {ticker}\n"
+            f"Lado: {side}\n"
+            f"Qty ejecutable ahora: {qty_exec_now}\n"
+            f"Diff ahora: {diff_now if diff_now is not None else 'N/A'}\n"
+            f"Edge ahora: {edge_now:.2f} USD/CEDEAR\n\n"
+            f"La oportunidad ya no está lo suficientemente buena."
+        )
+        return
+
+    if mode == "dry_run":
+        send_telegram(
             f"✅ DRY RUN OK: {trade_id}\n\n"
             f"Ticker: {ticker}\n"
             f"Lado: {side}\n"
@@ -347,27 +388,25 @@ def dry_run_trade(trade_id: str):
             f"≈ {usd_trade_exec_now:.2f} USD total ejecutable\n\n"
             f"Orden sugerida ahora:\n{action_text}"
         )
-        send_telegram(msg)
-    else:
-        update_pending_trade_status(ws_pending, row_idx, "REJECTED", "dry_run_revalidation_failed")
-        msg = (
-            f"❌ DRY RUN REJECTED: {trade_id}\n\n"
-            f"Ticker: {ticker}\n"
-            f"Lado: {side}\n"
-            f"Qty ejecutable ahora: {qty_exec_now}\n"
-            f"Diff ahora: {diff_now if diff_now is not None else 'N/A'}\n"
-            f"Edge ahora: {edge_now:.2f} USD/CEDEAR\n\n"
-            f"La oportunidad ya no está lo suficientemente buena."
-        )
-        send_telegram(msg)
+        return
+
+    if mode == "live":
+        send_telegram(f"🟡 LIVE MODE solicitado para {trade_id}")
+        update_pending_trade_status(ws_pending, row_idx, "CONFIRMED", "live_stub_ready")
+        live_execute_stub(trade_id, action_text)
+        return
+
+    send_telegram(f"⚠️ mode desconocido: {mode}")
+
 
 def main():
-    if len(sys.argv) < 2:
-        raise RuntimeError("Falta trade_id")
+    if len(sys.argv) < 3:
+        raise RuntimeError("Uso: python -m src.jobs.executor <trade_id> <mode>")
 
     trade_id = sys.argv[1]
-    print("DRY RUN trade_id:", trade_id)
-    dry_run_trade(trade_id)
+    mode = sys.argv[2].strip().lower()
+    process_trade(trade_id, mode)
+
 
 if __name__ == "__main__":
     main()

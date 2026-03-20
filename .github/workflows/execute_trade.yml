@@ -4,12 +4,48 @@ on:
   workflow_dispatch:
     inputs:
       trade_id:
-        description: "Trade ID to dry-run"
+        description: "Trade ID"
         required: true
+        type: string
+      mode:
+        description: "dry_run or live"
+        required: true
+        default: "dry_run"
+        type: choice
+        options:
+          - dry_run
+          - live
+      confirm_live:
+        description: "Type YES to allow live mode"
+        required: false
+        default: "NO"
         type: string
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      allow_live: ${{ steps.guard.outputs.allow_live }}
+
+    steps:
+      - name: Validate live confirmation
+        id: guard
+        shell: bash
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          CONFIRM="${{ github.event.inputs.confirm_live }}"
+
+          if [[ "$MODE" == "live" && "$CONFIRM" != "YES" ]]; then
+            echo "allow_live=false" >> "$GITHUB_OUTPUT"
+            echo "❌ Live mode blocked. You must set confirm_live=YES."
+          else
+            echo "allow_live=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Validation OK."
+          fi
+
   execute:
+    needs: validate
+    if: needs.validate.outputs.allow_live == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -25,8 +61,14 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Dry run trade revalidation
-        run: python -m src.jobs.executor "${{ github.event.inputs.trade_id }}"
+      - name: Show inputs
+        run: |
+          echo "trade_id=${{ github.event.inputs.trade_id }}"
+          echo "mode=${{ github.event.inputs.mode }}"
+          echo "confirm_live=${{ github.event.inputs.confirm_live }}"
+
+      - name: Execute trade
+        run: python -m src.jobs.executor "${{ github.event.inputs.trade_id }}" "${{ github.event.inputs.mode }}"
         env:
           PORTFOLIO_GS_CREDS: ${{ secrets.PORTFOLIO_GS_CREDS }}
           IOL_USERNAME: ${{ secrets.IOL_USERNAME }}
@@ -37,3 +79,15 @@ jobs:
           WATCH_MIN_DIFF_PCT: "1.0"
           WATCH_MIN_NET_USD_PER_CEDEAR: "0.12"
           MIN_EXEC_QTY: "5"
+
+  blocked:
+    needs: validate
+    if: needs.validate.outputs.allow_live != 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Blocked execution
+        run: |
+          echo "Execution blocked."
+          echo "If mode=live, you must set confirm_live=YES."
+          exit 1

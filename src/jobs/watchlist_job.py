@@ -59,6 +59,7 @@ WATCHLIST_HISTORY_HEADER = [
     "recommended_side",
     "n_target", "n_executable", "min_book_ars", "min_book_d",
     "price_ars", "price_d",
+    "gross_ars", "gross_usd",
     "usd_trade_exec", "score",
     "flag", "trade_id", "source"
 ]
@@ -96,7 +97,7 @@ def connect_sheets():
     return client.open(SPREADSHEET_NAME)
 
 
-def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 50, header: Optional[List[str]] = None):
+def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 60, header: Optional[List[str]] = None):
     try:
         ws = sheet.worksheet(title)
     except gspread.exceptions.WorksheetNotFound:
@@ -198,9 +199,7 @@ def executable_qty(n_target: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d:
     if not n_target or n_target <= 0:
         return 0
     if side == "COMPRA":
-        # comprar ARS al ask, vender D al bid
         return min(n_target, ask_qty_ars, bid_qty_d)
-    # comprar D al ask, vender ARS al bid
     return min(n_target, bid_qty_ars, ask_qty_d)
 
 
@@ -367,7 +366,7 @@ def send_telegram(msg: str):
 # MAIN
 # =========================
 def main():
-    print("🚀 Iniciando watchlist standalone refinado")
+    print("🚀 Iniciando watchlist")
 
     if not in_allowed_window():
         print("⏱ Fuera de ventana operativa.")
@@ -389,7 +388,6 @@ def main():
     sheet = connect_sheets()
     ws_watch_hist = ensure_worksheet(sheet, WATCHLIST_HISTORY_SHEET, header=WATCHLIST_HISTORY_HEADER)
     ws_pending = ensure_worksheet(sheet, PENDING_TRADES_SHEET, header=PENDING_TRADES_HEADER)
-
     watchlist = get_all_records(sheet, WATCHLIST_SHEET)
 
     today = str(date.today())
@@ -442,13 +440,13 @@ def main():
         if usd_ars_bid is None or usd_ars_ask is None:
             continue
 
-        # COMPRA FX: comprás ARS al ask, vendés D al bid
+        # ARS -> D
         diff_buy_pct = ((bid_d - usd_ars_ask) / usd_ars_ask) * 100 if usd_ars_ask > 0 else None
         edge_buy_gross = bid_d - usd_ars_ask
         fee_buy = fee_roundtrip_usd(usd_ars_ask, BROKER_FEE_PCT) or 0.0
         edge_buy_net = edge_buy_gross - fee_buy
 
-        # VENTA FX: comprás D al ask, vendés ARS al bid
+        # D -> ARS
         diff_sell_pct = ((usd_ars_bid - ask_d) / ask_d) * 100 if ask_d > 0 else None
         edge_sell_gross = usd_ars_bid - ask_d
         fee_sell = fee_roundtrip_usd(usd_ars_bid, BROKER_FEE_PCT) or 0.0
@@ -464,7 +462,6 @@ def main():
         price_ars = None
         price_d = None
 
-        # ARS -> D
         if diff_buy_pct is not None and diff_buy_pct >= WATCH_MIN_DIFF_PCT and edge_buy_net >= WATCH_MIN_NET_USD_PER_CEDEAR:
             n_target = required_cedears_for_target_usd(TARGET_USD, bid_d, ask_d, "COMPRA")
             if n_target:
@@ -481,7 +478,6 @@ def main():
                     price_ars = ask_ars
                     price_d = bid_d
 
-        # D -> ARS
         if not recommended_side and diff_sell_pct is not None and diff_sell_pct >= WATCH_MIN_DIFF_PCT and edge_sell_net >= WATCH_MIN_NET_USD_PER_CEDEAR:
             n_target = required_cedears_for_target_usd(TARGET_USD, bid_d, ask_d, "VENTA")
             if n_target:
@@ -503,7 +499,6 @@ def main():
 
         usd_trade_exec = edge_net * n_exec
         score = opportunity_score(usd_trade_exec, n_exec, n_target)
-
         flag = opportunity_flag(
             edge_net=edge_net,
             diff_pct=diff_pct,
@@ -516,6 +511,9 @@ def main():
 
         trade_id = generate_trade_id(ticker)
         expires_dt = now_dt + timedelta(minutes=PENDING_TRADE_TTL_MIN)
+
+        gross_ars = price_ars * n_exec if price_ars is not None else 0.0
+        gross_usd = price_d * n_exec if price_d is not None else 0.0
 
         history_row = [
             today, hhmm, ticker, sym_d, ratio,
@@ -530,6 +528,7 @@ def main():
             recommended_side,
             n_target, n_exec, min_book_ars, min_book_d,
             price_ars, price_d,
+            gross_ars, gross_usd,
             usd_trade_exec, score,
             flag, trade_id, "IOL"
         ]
@@ -559,7 +558,9 @@ def main():
             order_text = (
                 f"Orden sugerida:\n"
                 f"- Comprar {ticker} {n_exec} @ {price_ars:.2f} {label_ars}\n"
-                f"- Vender {sym_d} {n_exec} @ {price_d:.2f} {label_d}"
+                f"  Total compra ARS: {gross_ars:,.2f}\n"
+                f"- Vender {sym_d} {n_exec} @ {price_d:.2f} {label_d}\n"
+                f"  Total venta USD: {gross_usd:,.2f}"
             )
         else:
             side_text = "Comprá D → Vendé ARS (USD caro)"
@@ -568,7 +569,9 @@ def main():
             order_text = (
                 f"Orden sugerida:\n"
                 f"- Comprar {sym_d} {n_exec} @ {price_d:.2f} {label_d}\n"
-                f"- Vender {ticker} {n_exec} @ {price_ars:.2f} {label_ars}"
+                f"  Total compra USD: {gross_usd:,.2f}\n"
+                f"- Vender {ticker} {n_exec} @ {price_ars:.2f} {label_ars}\n"
+                f"  Total venta ARS: {gross_ars:,.2f}"
             )
 
         msg_item = (
@@ -585,7 +588,8 @@ def main():
             f"{order_text}\n\n"
             f"book ARS {bid_qty_ars}/{ask_qty_ars} | D {bid_qty_d}/{ask_qty_d}\n\n"
             f"trade_id: {trade_id}\n"
-            f"Para dry run: OK {trade_id}"
+            f"Para dry run: DRY {trade_id}\n"
+            f"Para ejecutar: EXEC {trade_id}"
         )
 
         watch_opps.append((score, msg_item, history_row, pending_row))
