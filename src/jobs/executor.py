@@ -5,7 +5,7 @@ import time
 import requests
 import gspread
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from oauth2client.service_account import ServiceAccountCredentials
 
 # =========================
@@ -22,6 +22,8 @@ WATCH_MIN_DIFF_PCT = float(os.environ.get("WATCH_MIN_DIFF_PCT", "1.0"))
 WATCH_MIN_NET_USD_PER_CEDEAR = float(os.environ.get("WATCH_MIN_NET_USD_PER_CEDEAR", "0.12"))
 MIN_EXEC_QTY = int(os.environ.get("MIN_EXEC_QTY", "5"))
 MIN_BUFFER_RATIO = float(os.environ.get("MIN_BUFFER_RATIO", "1.2"))
+ALT_INCLUDE_OFFICIAL = os.environ.get("ALT_INCLUDE_OFFICIAL", "0") == "1"
+FILTER_BEATS_ALT = os.environ.get("FILTER_BEATS_ALT", "1") == "1"
 
 PENDING_TRADES_HEADER = [
     "trade_id",
@@ -37,6 +39,10 @@ PENDING_TRADES_HEADER = [
     "edge_net",
     "diff_pct",
     "ccl_mkt",
+    "alt_best",
+    "alt_best_label",
+    "fx_impl_trade",
+    "vs_alt_pct",
     "status",
     "reason"
 ]
@@ -56,7 +62,7 @@ def connect_sheets():
     return client.open(SPREADSHEET_NAME)
 
 
-def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 20, header: Optional[List[str]] = None):
+def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 30, header: Optional[List[str]] = None):
     try:
         ws = sheet.worksheet(title)
     except gspread.exceptions.WorksheetNotFound:
@@ -76,8 +82,7 @@ def get_all_records(sheet, tab_name: str) -> List[Dict[str, Any]]:
 
 
 def update_pending_trade_status(ws, row_idx: int, status: str, reason: str = ""):
-    # N:O => status, reason
-    ws.update(f"N{row_idx}:O{row_idx}", [[status, reason]])
+    ws.update(f"R{row_idx}:S{row_idx}", [[status, reason]])
 
 
 def find_pending_trade(sheet, trade_id: str):
@@ -106,6 +111,12 @@ def safe_float(x) -> Optional[float]:
         return None
 
 
+def pick_mark_or_last(pq: dict) -> Optional[float]:
+    if pq.get("bid") is not None and pq.get("ask") is not None:
+        return (pq["bid"] + pq["ask"]) / 2.0
+    return pq.get("last")
+
+
 def fee_roundtrip_usd(usd_base: float, fee_pct_per_tx: float) -> Optional[float]:
     if usd_base is None:
         return None
@@ -122,22 +133,40 @@ def executable_qty(n_target: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d:
     if not n_target or n_target <= 0:
         return 0
     if side == "COMPRA":
-        # comprar ARS al ask, vender D al bid
         return min(n_target, ask_qty_ars, bid_qty_d)
-    # comprar D al ask, vender ARS al bid
     return min(n_target, bid_qty_ars, ask_qty_d)
 
 
 def execution_buffer_ratio(side: str, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int, n_exec: int) -> float:
     if n_exec <= 0:
         return 0.0
-
     if side == "COMPRA":
         relevant_min = min(ask_qty_ars, bid_qty_d)
     else:
         relevant_min = min(bid_qty_ars, ask_qty_d)
-
     return relevant_min / n_exec
+
+
+def choose_best_alt(
+    mep_api: Optional[float],
+    mep_own: Optional[float],
+    official: Optional[float],
+    include_official: bool,
+) -> Tuple[Optional[float], str]:
+    candidates: List[Tuple[str, float]] = []
+
+    if mep_api and mep_api > 0:
+        candidates.append(("MEP API", mep_api))
+    if mep_own and mep_own > 0:
+        candidates.append(("MEP propio AL30", mep_own))
+    if include_official and official and official > 0:
+        candidates.append(("Oficial", official))
+
+    if not candidates:
+        return None, ""
+
+    best_label, best_value = min(candidates, key=lambda x: x[1])
+    return best_value, best_label
 
 
 # =========================
@@ -212,6 +241,7 @@ class IOLClient:
 
 
 def parse_iol_quote_full(q: Dict[str, Any]) -> Dict[str, Any]:
+    last = safe_float(q.get("ultimoPrecio"))
     plazo = q.get("plazo")
     bid = None
     ask = None
@@ -226,12 +256,62 @@ def parse_iol_quote_full(q: Dict[str, Any]) -> Dict[str, Any]:
         ask_qty = int(safe_float(puntas[0].get("cantidadVenta")) or 0)
 
     return {
+        "last": last,
         "bid": bid,
         "ask": ask,
         "bid_qty": bid_qty,
         "ask_qty": ask_qty,
         "plazo": plazo,
     }
+
+
+def get_mep_ref(iol: IOLClient, plazo_target: str) -> Optional[float]:
+    q_ars = iol.get_quote(IOL_MERCADO, "AL30")
+    q_usd = iol.get_quote(IOL_MERCADO, "AL30D")
+    if not q_ars or not q_usd:
+        return None
+
+    p_ars = parse_iol_quote_full(q_ars)
+    p_usd = parse_iol_quote_full(q_usd)
+
+    if p_ars.get("plazo") != plazo_target or p_usd.get("plazo") != plazo_target:
+        return None
+
+    al30_ars = pick_mark_or_last(p_ars)
+    al30d_usd = pick_mark_or_last(p_usd)
+
+    if not al30_ars or not al30d_usd or al30d_usd <= 0:
+        return None
+
+    return al30_ars / al30d_usd
+
+
+# =========================
+# MARKET REFS
+# =========================
+def get_dollar_refs() -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    try:
+        url = "https://dolarapi.com/v1/dolares"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+
+        official = None
+        mep = None
+        ccl = None
+
+        for item in data:
+            casa = (item.get("casa") or "").lower()
+            venta = safe_float(item.get("venta"))
+            if casa == "oficial":
+                official = venta
+            elif casa == "bolsa":
+                mep = venta
+            elif casa == "contadoconliqui":
+                ccl = venta
+
+        return official, mep, ccl
+    except:
+        return None, None, None
 
 
 # =========================
@@ -286,8 +366,6 @@ def process_trade(trade_id: str, mode: str):
     ticker_d = (trade.get("ticker_d") or "").strip().upper()
     side = (trade.get("side") or "").strip().upper()
 
-    ref_price_ars = safe_float(trade.get("price_ars"))
-    ref_price_d = safe_float(trade.get("price_d"))
     qty_target = int(safe_float(trade.get("qty_target")) or 0)
     old_qty_exec = int(safe_float(trade.get("qty_exec")) or 0)
     ref_edge = safe_float(trade.get("edge_net"))
@@ -316,6 +394,15 @@ def process_trade(trade_id: str, mode: str):
     bid_qty_d = d["bid_qty"]
     ask_qty_d = d["ask_qty"]
 
+    official_now, mep_api_now, _ = get_dollar_refs()
+    mep_own_now = get_mep_ref(iol, "T1")
+    alt_best_now, alt_best_label_now = choose_best_alt(
+        mep_api=mep_api_now,
+        mep_own=mep_own_now,
+        official=official_now,
+        include_official=ALT_INCLUDE_OFFICIAL,
+    )
+
     if side == "COMPRA":
         if ask_ars is None or bid_d is None:
             update_pending_trade_status(ws_pending, row_idx, "REJECTED", "missing_revalidation_prices")
@@ -332,12 +419,18 @@ def process_trade(trade_id: str, mode: str):
 
         gross_ars_now = ask_ars * qty_exec_now
         gross_usd_now = bid_d * qty_exec_now
+        fx_impl_trade_now = (gross_ars_now / gross_usd_now) if gross_usd_now > 0 else None
+
+        vs_alt_pct_now = None
+        if alt_best_now and fx_impl_trade_now and alt_best_now > 0:
+            vs_alt_pct_now = ((alt_best_now - fx_impl_trade_now) / alt_best_now) * 100
 
         still_valid = (
             qty_exec_now >= MIN_EXEC_QTY and
             buffer_ratio >= MIN_BUFFER_RATIO and
             diff_now is not None and diff_now >= WATCH_MIN_DIFF_PCT and
-            edge_now >= WATCH_MIN_NET_USD_PER_CEDEAR
+            edge_now >= WATCH_MIN_NET_USD_PER_CEDEAR and
+            (not FILTER_BEATS_ALT or vs_alt_pct_now is None or vs_alt_pct_now > 0)
         )
 
         action_text = (
@@ -363,12 +456,18 @@ def process_trade(trade_id: str, mode: str):
 
         gross_ars_now = bid_ars * qty_exec_now
         gross_usd_now = ask_d * qty_exec_now
+        fx_impl_trade_now = (gross_ars_now / gross_usd_now) if gross_usd_now > 0 else None
+
+        vs_alt_pct_now = None
+        if alt_best_now and fx_impl_trade_now and alt_best_now > 0:
+            vs_alt_pct_now = ((alt_best_now - fx_impl_trade_now) / alt_best_now) * 100
 
         still_valid = (
             qty_exec_now >= MIN_EXEC_QTY and
             buffer_ratio >= MIN_BUFFER_RATIO and
             diff_now is not None and diff_now >= WATCH_MIN_DIFF_PCT and
-            edge_now >= WATCH_MIN_NET_USD_PER_CEDEAR
+            edge_now >= WATCH_MIN_NET_USD_PER_CEDEAR and
+            (not FILTER_BEATS_ALT or vs_alt_pct_now is None or vs_alt_pct_now > 0)
         )
 
         action_text = (
@@ -380,6 +479,14 @@ def process_trade(trade_id: str, mode: str):
 
     usd_trade_exec_now = edge_now * qty_exec_now if qty_exec_now > 0 else 0.0
 
+    alt_block = ""
+    if alt_best_now and fx_impl_trade_now and vs_alt_pct_now is not None:
+        alt_block = (
+            f"FX implícito trade: {fx_impl_trade_now:.2f}\n"
+            f"Mejor alternativa: {alt_best_now:.2f} ({alt_best_label_now})\n"
+            f"vs alternativa: {vs_alt_pct_now:+.2f}%\n"
+        )
+
     if not still_valid:
         update_pending_trade_status(ws_pending, row_idx, "REJECTED", "revalidation_failed")
         send_telegram(
@@ -389,7 +496,8 @@ def process_trade(trade_id: str, mode: str):
             f"Qty ejecutable ahora: {qty_exec_now}\n"
             f"buffer liquidez: {buffer_ratio:.2f}x\n"
             f"Diff ahora: {diff_now if diff_now is not None else 'N/A'}\n"
-            f"Edge ahora: {edge_now:.2f} USD/CEDEAR\n\n"
+            f"Edge ahora: {edge_now:.2f} USD/CEDEAR\n"
+            f"{alt_block}\n"
             f"La oportunidad ya no está lo suficientemente buena."
         )
         return
@@ -407,6 +515,7 @@ def process_trade(trade_id: str, mode: str):
             f"Edge original: {ref_edge:.2f} USD/CEDEAR\n"
             f"Edge ahora: {edge_now:.2f} USD/CEDEAR\n"
             f"buffer liquidez: {buffer_ratio:.2f}x\n"
+            f"{alt_block}"
             f"≈ {usd_trade_exec_now:.2f} USD total ejecutable\n\n"
             f"Orden sugerida ahora:\n{action_text}"
         )

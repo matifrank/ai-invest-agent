@@ -80,6 +80,8 @@ jobs:
           WATCH_MIN_NET_USD_PER_CEDEAR: "0.12"
           MIN_EXEC_QTY: "5"
           MIN_BUFFER_RATIO: "1.2"
+          FILTER_BEATS_ALT: "1"
+          ALT_INCLUDE_OFFICIAL: "0"
 
   blocked:
     needs: validate

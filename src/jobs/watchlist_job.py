@@ -43,6 +43,10 @@ PENDING_TRADE_TTL_MIN = int(os.environ.get("PENDING_TRADE_TTL_MIN", "10"))
 MIN_BUFFER_RATIO = float(os.environ.get("MIN_BUFFER_RATIO", "1.2"))
 MAX_BUFFER_BONUS = float(os.environ.get("MAX_BUFFER_BONUS", "1.5"))
 
+# Nueva lógica vs alternativa real
+FILTER_BEATS_ALT = os.environ.get("FILTER_BEATS_ALT", "1") == "1"
+ALT_INCLUDE_OFFICIAL = os.environ.get("ALT_INCLUDE_OFFICIAL", "0") == "1"
+
 ALLOWED_WINDOWS = [
     (11, 0, 13, 0),
     (16, 0, 17, 0),
@@ -52,7 +56,8 @@ WATCHLIST_HISTORY_HEADER = [
     "date", "time_arg", "ticker", "ticker_d", "ratio",
     "bid_ars", "ask_ars", "bid_qty_ars", "ask_qty_ars", "monto_ars", "plazo_ars",
     "bid_d", "ask_d", "bid_qty_d", "ask_qty_d", "plazo_d",
-    "ccl_mkt", "mep_mkt", "mep_ccl_diff_pct",
+    "official_mkt", "ccl_mkt", "mep_api_mkt", "mep_own_mkt", "mep_ccl_diff_pct",
+    "alt_best", "alt_best_label", "fx_impl_trade", "vs_alt_pct",
     "usd_ars_bid", "usd_ars_ask",
     "diff_buy_pct", "diff_sell_pct",
     "edge_buy_gross", "edge_sell_gross",
@@ -80,6 +85,10 @@ PENDING_TRADES_HEADER = [
     "edge_net",
     "diff_pct",
     "ccl_mkt",
+    "alt_best",
+    "alt_best_label",
+    "fx_impl_trade",
+    "vs_alt_pct",
     "status",
     "reason"
 ]
@@ -99,7 +108,7 @@ def connect_sheets():
     return client.open(SPREADSHEET_NAME)
 
 
-def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 60, header: Optional[List[str]] = None):
+def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 80, header: Optional[List[str]] = None):
     try:
         ws = sheet.worksheet(title)
     except gspread.exceptions.WorksheetNotFound:
@@ -172,6 +181,12 @@ def guess_d_symbol(sym: str) -> str:
     return f"{sym}D"
 
 
+def pick_mark_or_last(pq: dict) -> Optional[float]:
+    if pq.get("bid") is not None and pq.get("ask") is not None:
+        return (pq["bid"] + pq["ask"]) / 2.0
+    return pq.get("last")
+
+
 def fee_roundtrip_usd(usd_base: float, fee_pct_per_tx: float) -> Optional[float]:
     if usd_base is None:
         return None
@@ -237,6 +252,28 @@ def opportunity_score(usd_trade_exec: float, n_exec: int, n_target: int, buffer_
     fill_ratio = min(1.0, n_exec / n_target)
     buffer_bonus = min(MAX_BUFFER_BONUS, buffer_ratio)
     return usd_trade_exec * fill_ratio * buffer_bonus
+
+
+def choose_best_alt(
+    mep_api: Optional[float],
+    mep_own: Optional[float],
+    official: Optional[float],
+    include_official: bool,
+) -> Tuple[Optional[float], str]:
+    candidates: List[Tuple[str, float]] = []
+
+    if mep_api and mep_api > 0:
+        candidates.append(("MEP API", mep_api))
+    if mep_own and mep_own > 0:
+        candidates.append(("MEP propio AL30", mep_own))
+    if include_official and official and official > 0:
+        candidates.append(("Oficial", official))
+
+    if not candidates:
+        return None, ""
+
+    best_label, best_value = min(candidates, key=lambda x: x[1])
+    return best_value, best_label
 
 
 # =========================
@@ -340,29 +377,56 @@ def parse_iol_quote_full(q: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def get_mep_ref(iol: IOLClient, plazo_target: str) -> Optional[float]:
+    q_ars = iol.get_quote(IOL_MERCADO, "AL30")
+    q_usd = iol.get_quote(IOL_MERCADO, "AL30D")
+    if not q_ars or not q_usd:
+        return None
+
+    p_ars = parse_iol_quote_full(q_ars)
+    p_usd = parse_iol_quote_full(q_usd)
+
+    if p_ars.get("plazo") != plazo_target or p_usd.get("plazo") != plazo_target:
+        return None
+
+    al30_ars = pick_mark_or_last(p_ars)
+    al30d_usd = pick_mark_or_last(p_usd)
+
+    if not al30_ars or not al30d_usd or al30d_usd <= 0:
+        return None
+
+    return al30_ars / al30d_usd
+
+
 # =========================
 # MARKET REFS
 # =========================
-def get_dollar_refs() -> Tuple[Optional[float], Optional[float]]:
+def get_dollar_refs() -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Returns: official, mep_api, ccl
+    """
     try:
         url = "https://dolarapi.com/v1/dolares"
         r = requests.get(url, timeout=10)
         data = r.json()
 
-        ccl = None
+        official = None
         mep = None
+        ccl = None
 
         for item in data:
             casa = (item.get("casa") or "").lower()
             venta = safe_float(item.get("venta"))
-            if casa == "contadoconliqui":
-                ccl = venta
+            if casa == "oficial":
+                official = venta
             elif casa == "bolsa":
                 mep = venta
+            elif casa == "contadoconliqui":
+                ccl = venta
 
-        return ccl, mep
+        return official, mep, ccl
     except:
-        return None, None
+        return None, None, None
 
 
 # =========================
@@ -391,14 +455,17 @@ def main():
         raise RuntimeError("Faltan IOL_USERNAME / IOL_PASSWORD.")
 
     iol = IOLClient(os.environ["IOL_USERNAME"], os.environ["IOL_PASSWORD"])
-    ccl_mkt, mep_mkt = get_dollar_refs()
+
+    official_mkt, mep_api_mkt, ccl_mkt = get_dollar_refs()
     if not ccl_mkt:
         print("❌ No CCL market ref")
         return
 
+    mep_own_mkt = get_mep_ref(iol, "T1")
+
     mep_ccl_diff_pct = None
-    if mep_mkt and mep_mkt > 0:
-        mep_ccl_diff_pct = ((ccl_mkt - mep_mkt) / mep_mkt) * 100
+    if mep_api_mkt and mep_api_mkt > 0:
+        mep_ccl_diff_pct = ((ccl_mkt - mep_api_mkt) / mep_api_mkt) * 100
 
     sheet = connect_sheets()
     ws_watch_hist = ensure_worksheet(sheet, WATCHLIST_HISTORY_SHEET, header=WATCHLIST_HISTORY_HEADER)
@@ -512,6 +579,24 @@ def main():
         if not recommended_side or not n_target or n_exec < MIN_EXEC_QTY:
             continue
 
+        gross_ars = price_ars * n_exec if price_ars is not None else 0.0
+        gross_usd = price_d * n_exec if price_d is not None else 0.0
+        fx_impl_trade = (gross_ars / gross_usd) if gross_usd > 0 else None
+
+        alt_best, alt_best_label = choose_best_alt(
+            mep_api=mep_api_mkt,
+            mep_own=mep_own_mkt,
+            official=official_mkt,
+            include_official=ALT_INCLUDE_OFFICIAL,
+        )
+
+        vs_alt_pct = None
+        if alt_best and fx_impl_trade and alt_best > 0:
+            vs_alt_pct = ((alt_best - fx_impl_trade) / alt_best) * 100
+
+        if FILTER_BEATS_ALT and vs_alt_pct is not None and vs_alt_pct <= 0:
+            continue
+
         buffer_ratio = execution_buffer_ratio(
             recommended_side,
             bid_qty_ars,
@@ -540,14 +625,19 @@ def main():
         trade_id = generate_trade_id(ticker)
         expires_dt = now_dt + timedelta(minutes=PENDING_TRADE_TTL_MIN)
 
-        gross_ars = price_ars * n_exec if price_ars is not None else 0.0
-        gross_usd = price_d * n_exec if price_d is not None else 0.0
-
         history_row = [
             today, hhmm, ticker, sym_d, ratio,
             bid_ars, ask_ars, bid_qty_ars, ask_qty_ars, monto_ars if monto_ars is not None else "", plazo_ars,
             bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
-            ccl_mkt, mep_mkt if mep_mkt is not None else "", mep_ccl_diff_pct if mep_ccl_diff_pct is not None else "",
+            official_mkt if official_mkt is not None else "",
+            ccl_mkt,
+            mep_api_mkt if mep_api_mkt is not None else "",
+            mep_own_mkt if mep_own_mkt is not None else "",
+            mep_ccl_diff_pct if mep_ccl_diff_pct is not None else "",
+            alt_best if alt_best is not None else "",
+            alt_best_label,
+            fx_impl_trade if fx_impl_trade is not None else "",
+            vs_alt_pct if vs_alt_pct is not None else "",
             usd_ars_bid, usd_ars_ask,
             diff_buy_pct, diff_sell_pct,
             edge_buy_gross, edge_sell_gross,
@@ -575,6 +665,10 @@ def main():
             edge_net,
             diff_pct,
             ccl_mkt,
+            alt_best if alt_best is not None else "",
+            alt_best_label,
+            fx_impl_trade if fx_impl_trade is not None else "",
+            vs_alt_pct if vs_alt_pct is not None else "",
             "PENDING",
             ""
         ]
@@ -602,6 +696,14 @@ def main():
                 f"  Total venta ARS: {gross_ars:,.2f}"
             )
 
+        alt_block = ""
+        if alt_best and fx_impl_trade and vs_alt_pct is not None:
+            alt_block = (
+                f"FX implícito trade: {fx_impl_trade:.2f}\n"
+                f"Mejor alternativa: {alt_best:.2f} ({alt_best_label})\n"
+                f"vs alternativa: {vs_alt_pct:+.2f}%\n\n"
+            )
+
         msg_item = (
             f"{flag} ⚡ {ticker} {recommended_side}\n"
             f"{side_text}\n\n"
@@ -614,6 +716,7 @@ def main():
             f"≈ {usd_trade_exec:.2f} USD total ejecutable\n"
             f"buffer liquidez {buffer_ratio:.2f}x\n"
             f"score {score:.2f}\n\n"
+            f"{alt_block}"
             f"{order_text}\n\n"
             f"book ARS {bid_qty_ars}/{ask_qty_ars} | D {bid_qty_d}/{ask_qty_d}\n\n"
             f"trade_id: {trade_id}\n"
@@ -634,8 +737,12 @@ def main():
         append_row_aligned(ws_pending, PENDING_TRADES_HEADER, pending_row)
 
     header = f"👀 Watchlist oportunidades ARS vs D\nCCL: {ccl_mkt:.0f}"
-    if mep_mkt:
-        header += f" | MEP: {mep_mkt:.0f}"
+    if mep_api_mkt:
+        header += f" | MEP API: {mep_api_mkt:.0f}"
+    if mep_own_mkt:
+        header += f" | MEP propio: {mep_own_mkt:.0f}"
+    if official_mkt:
+        header += f" | Oficial: {official_mkt:.0f}"
     header += f" | {hhmm}"
 
     if mep_ccl_diff_pct is not None and abs(mep_ccl_diff_pct) >= MEP_CCL_DIVERGENCE_ALERT_PCT:
