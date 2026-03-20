@@ -2,6 +2,7 @@ import os
 import json
 import time
 import math
+import random
 import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -14,6 +15,7 @@ from typing import Optional, Dict, Any, List, Tuple
 SPREADSHEET_NAME = "ai-portfolio-agent"
 WATCHLIST_SHEET = "watchlist"
 WATCHLIST_HISTORY_SHEET = "watchlist_history_v2"
+PENDING_TRADES_SHEET = "pending_trades"
 
 IOL_BASE = "https://api.invertironline.com"
 IOL_MERCADO = "bcba"
@@ -37,6 +39,7 @@ FLAG_ULTRA_EDGE_USD = float(os.environ.get("FLAG_ULTRA_EDGE_USD", "1.50"))
 FLAG_ULTRA_DIFF_PCT = float(os.environ.get("FLAG_ULTRA_DIFF_PCT", "4.0"))
 
 MEP_CCL_DIVERGENCE_ALERT_PCT = float(os.environ.get("MEP_CCL_DIVERGENCE_ALERT_PCT", "1.0"))
+PENDING_TRADE_TTL_MIN = int(os.environ.get("PENDING_TRADE_TTL_MIN", "3"))
 
 ALLOWED_WINDOWS = [
     (11, 0, 13, 0),
@@ -57,10 +60,8 @@ WATCHLIST_HISTORY_HEADER = [
     "n_target", "n_executable", "min_book_ars", "min_book_d",
     "price_ars", "price_d",
     "usd_trade_exec", "score",
-    "flag", "source"
+    "flag", "trade_id", "source"
 ]
-
-PENDING_TRADES_SHEET = "pending_trades"
 
 PENDING_TRADES_HEADER = [
     "trade_id",
@@ -94,6 +95,7 @@ def connect_sheets():
     client = gspread.authorize(creds)
     return client.open(SPREADSHEET_NAME)
 
+
 def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 50, header: Optional[List[str]] = None):
     try:
         ws = sheet.worksheet(title)
@@ -108,8 +110,10 @@ def ensure_worksheet(sheet, title: str, rows: int = 2000, cols: int = 50, header
             ws.update("1:1", [header])
     return ws
 
+
 def get_all_records(sheet, tab_name: str) -> List[Dict[str, Any]]:
     return sheet.worksheet(tab_name).get_all_records()
+
 
 def append_row_aligned(ws, header: List[str], row: List[Any]):
     if len(row) < len(header):
@@ -118,17 +122,21 @@ def append_row_aligned(ws, header: List[str], row: List[Any]):
         row = row[:len(header)]
     ws.append_row(row, value_input_option="USER_ENTERED")
 
+
 # =========================
 # TIME
 # =========================
 def now_arg() -> datetime:
     return datetime.utcnow() - timedelta(hours=3)
 
+
 def hhmm_arg() -> str:
     return now_arg().strftime("%H:%M")
 
-def generate_trade_id(ticker):
-    return f"{ticker}_{int(time.time())}_{random.randint(100,999)}"
+
+def generate_trade_id(ticker: str) -> str:
+    return f"{ticker}_{int(time.time())}_{random.randint(100, 999)}"
+
 
 def in_allowed_window() -> bool:
     if not USE_TIME_WINDOW:
@@ -141,6 +149,7 @@ def in_allowed_window() -> bool:
         if start <= current <= end:
             return True
     return False
+
 
 # =========================
 # UTILS
@@ -155,18 +164,22 @@ def safe_float(x) -> Optional[float]:
     except:
         return None
 
+
 def guess_d_symbol(sym: str) -> str:
     return f"{sym}D"
+
 
 def fee_roundtrip_usd(usd_base: float, fee_pct_per_tx: float) -> Optional[float]:
     if usd_base is None:
         return None
     return usd_base * ((2 * fee_pct_per_tx) / 100.0)
 
+
 def usd_per_cedear(price_ars: float, ccl_mkt: float) -> Optional[float]:
     if not price_ars or not ccl_mkt or ccl_mkt <= 0:
         return None
     return price_ars / ccl_mkt
+
 
 def required_cedears_for_target_usd(target_usd: float, bid_d: float, ask_d: float, side: str) -> Optional[int]:
     usd_per_ce = bid_d if side == "COMPRA" else ask_d
@@ -174,10 +187,12 @@ def required_cedears_for_target_usd(target_usd: float, bid_d: float, ask_d: floa
         return None
     return int(math.ceil(target_usd / usd_per_ce))
 
+
 def min_qty_thresholds_for_target(n: int) -> Tuple[int, int]:
     if not n or n <= 0:
         return (1, 1)
     return (max(MIN_TOP_QTY_ARS, n), max(MIN_TOP_QTY_D, n))
+
 
 def executable_qty(n_target: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int, side: str) -> int:
     if not n_target or n_target <= 0:
@@ -187,6 +202,7 @@ def executable_qty(n_target: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d:
         return min(n_target, ask_qty_ars, bid_qty_d)
     # comprar D al ask, vender ARS al bid
     return min(n_target, bid_qty_ars, ask_qty_d)
+
 
 def opportunity_flag(edge_net: float, diff_pct: float, n_executable: int, bid_qty_ars: int, ask_qty_ars: int, bid_qty_d: int, ask_qty_d: int) -> str:
     ultra_liq = (
@@ -201,11 +217,13 @@ def opportunity_flag(edge_net: float, diff_pct: float, n_executable: int, bid_qt
         return "🟢 STRONG"
     return "🟡 MEDIUM"
 
+
 def opportunity_score(usd_trade_exec: float, n_exec: int, n_target: int) -> float:
     if not n_target or n_target <= 0:
         return 0.0
     fill_ratio = min(1.0, n_exec / n_target)
     return usd_trade_exec * fill_ratio
+
 
 # =========================
 # IOL CLIENT
@@ -279,6 +297,7 @@ class IOLClient:
         except:
             return None
 
+
 def parse_iol_quote_full(q: Dict[str, Any]) -> Dict[str, Any]:
     last = safe_float(q.get("ultimoPrecio"))
     plazo = q.get("plazo")
@@ -306,6 +325,7 @@ def parse_iol_quote_full(q: Dict[str, Any]) -> Dict[str, Any]:
         "monto": monto,
     }
 
+
 # =========================
 # MARKET REFS
 # =========================
@@ -330,6 +350,7 @@ def get_dollar_refs() -> Tuple[Optional[float], Optional[float]]:
     except:
         return None, None
 
+
 # =========================
 # TELEGRAM
 # =========================
@@ -340,6 +361,7 @@ def send_telegram(msg: str):
     r = requests.post(url, json={"chat_id": chat_id, "text": msg}, timeout=10)
     print("📨 Telegram status:", r.status_code)
     print("📨 Telegram response:", r.text)
+
 
 # =========================
 # MAIN
@@ -365,17 +387,16 @@ def main():
         mep_ccl_diff_pct = ((ccl_mkt - mep_mkt) / mep_mkt) * 100
 
     sheet = connect_sheets()
-    ws_watch_hist = ensure_worksheet(
-        sheet,
-        WATCHLIST_HISTORY_SHEET,
-        header=WATCHLIST_HISTORY_HEADER,
-    )
+    ws_watch_hist = ensure_worksheet(sheet, WATCHLIST_HISTORY_SHEET, header=WATCHLIST_HISTORY_HEADER)
+    ws_pending = ensure_worksheet(sheet, PENDING_TRADES_SHEET, header=PENDING_TRADES_HEADER)
+
     watchlist = get_all_records(sheet, WATCHLIST_SHEET)
 
     today = str(date.today())
     hhmm = hhmm_arg()
+    now_dt = now_arg()
 
-    watch_opps: List[Tuple[float, str, list]] = []
+    watch_opps: List[Tuple[float, str, list, list]] = []
 
     for w in watchlist:
         ticker = (w.get("ticker") or "").strip().upper()
@@ -443,7 +464,7 @@ def main():
         price_ars = None
         price_d = None
 
-        # lado ARS -> D
+        # ARS -> D
         if diff_buy_pct is not None and diff_buy_pct >= WATCH_MIN_DIFF_PCT and edge_buy_net >= WATCH_MIN_NET_USD_PER_CEDEAR:
             n_target = required_cedears_for_target_usd(TARGET_USD, bid_d, ask_d, "COMPRA")
             if n_target:
@@ -460,7 +481,7 @@ def main():
                     price_ars = ask_ars
                     price_d = bid_d
 
-        # lado D -> ARS
+        # D -> ARS
         if not recommended_side and diff_sell_pct is not None and diff_sell_pct >= WATCH_MIN_DIFF_PCT and edge_sell_net >= WATCH_MIN_NET_USD_PER_CEDEAR:
             n_target = required_cedears_for_target_usd(TARGET_USD, bid_d, ask_d, "VENTA")
             if n_target:
@@ -493,7 +514,10 @@ def main():
             ask_qty_d=ask_qty_d,
         )
 
-        row = [
+        trade_id = generate_trade_id(ticker)
+        expires_dt = now_dt + timedelta(minutes=PENDING_TRADE_TTL_MIN)
+
+        history_row = [
             today, hhmm, ticker, sym_d, ratio,
             bid_ars, ask_ars, bid_qty_ars, ask_qty_ars, monto_ars if monto_ars is not None else "", plazo_ars,
             bid_d, ask_d, bid_qty_d, ask_qty_d, plazo_d,
@@ -507,7 +531,25 @@ def main():
             n_target, n_exec, min_book_ars, min_book_d,
             price_ars, price_d,
             usd_trade_exec, score,
-            flag, "IOL"
+            flag, trade_id, "IOL"
+        ]
+
+        pending_row = [
+            trade_id,
+            now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            expires_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            ticker,
+            sym_d,
+            recommended_side,
+            price_ars,
+            price_d,
+            n_target,
+            n_exec,
+            edge_net,
+            diff_pct,
+            ccl_mkt,
+            "PENDING",
+            ""
         ]
 
         if recommended_side == "COMPRA":
@@ -541,10 +583,12 @@ def main():
             f"≈ {usd_trade_exec:.2f} USD total ejecutable\n"
             f"score {score:.2f}\n\n"
             f"{order_text}\n\n"
-            f"book ARS {bid_qty_ars}/{ask_qty_ars} | D {bid_qty_d}/{ask_qty_d}"
+            f"book ARS {bid_qty_ars}/{ask_qty_ars} | D {bid_qty_d}/{ask_qty_d}\n\n"
+            f"trade_id: {trade_id}\n"
+            f"Para dry run: OK {trade_id}"
         )
 
-        watch_opps.append((score, msg_item, row))
+        watch_opps.append((score, msg_item, history_row, pending_row))
 
     if not watch_opps:
         print("No watchlist opportunities today")
@@ -552,8 +596,9 @@ def main():
 
     watch_opps_sorted = sorted(watch_opps, key=lambda x: x[0], reverse=True)[:TOP_N_ALERTS]
 
-    for _, _, row in watch_opps_sorted:
-        append_row_aligned(ws_watch_hist, WATCHLIST_HISTORY_HEADER, row)
+    for _, _, history_row, pending_row in watch_opps_sorted:
+        append_row_aligned(ws_watch_hist, WATCHLIST_HISTORY_HEADER, history_row)
+        append_row_aligned(ws_pending, PENDING_TRADES_HEADER, pending_row)
 
     header = f"👀 Watchlist oportunidades ARS vs D\nCCL: {ccl_mkt:.0f}"
     if mep_mkt:
@@ -564,11 +609,12 @@ def main():
         header += f"\n⚠️ Divergencia MEP/CCL: {mep_ccl_diff_pct:+.2f}%"
 
     formatted = []
-    for i, (_, msg_item, _) in enumerate(watch_opps_sorted, start=1):
+    for i, (_, msg_item, _, _) in enumerate(watch_opps_sorted, start=1):
         formatted.append(f"#{i}\n{msg_item}")
 
     msg = header + "\n\n" + "\n\n".join(formatted) + "\n\nPipeline funcionando 🤖"
     send_telegram(msg)
+
 
 if __name__ == "__main__":
     main()
