@@ -39,7 +39,7 @@ FLAG_ULTRA_EDGE_USD = float(os.environ.get("FLAG_ULTRA_EDGE_USD", "1.50"))
 FLAG_ULTRA_DIFF_PCT = float(os.environ.get("FLAG_ULTRA_DIFF_PCT", "4.0"))
 
 MEP_CCL_DIVERGENCE_ALERT_PCT = float(os.environ.get("MEP_CCL_DIVERGENCE_ALERT_PCT", "1.0"))
-PENDING_TRADE_TTL_MIN = int(os.environ.get("PENDING_TRADE_TTL_MIN", "3"))
+PENDING_TRADE_TTL_MIN = int(os.environ.get("PENDING_TRADE_TTL_MIN", "10"))
 
 ALLOWED_WINDOWS = [
     (11, 0, 13, 0),
