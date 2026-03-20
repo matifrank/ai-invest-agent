@@ -26,7 +26,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Dry run trade revalidation
-        run: python executor.py "${{ github.event.inputs.trade_id }}"
+        run: python -m src.jobs.executor.py "${{ github.event.inputs.trade_id }}"
         env:
           PORTFOLIO_GS_CREDS: ${{ secrets.PORTFOLIO_GS_CREDS }}
           IOL_USERNAME: ${{ secrets.IOL_USERNAME }}
