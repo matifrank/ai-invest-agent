@@ -60,6 +60,26 @@ WATCHLIST_HISTORY_HEADER = [
     "flag", "source"
 ]
 
+PENDING_TRADES_SHEET = "pending_trades"
+
+PENDING_TRADES_HEADER = [
+    "trade_id",
+    "created_at_arg",
+    "expires_at_arg",
+    "ticker",
+    "ticker_d",
+    "side",
+    "price_ars",
+    "price_d",
+    "qty_target",
+    "qty_exec",
+    "edge_net",
+    "diff_pct",
+    "ccl_mkt",
+    "status",
+    "reason"
+]
+
 # =========================
 # SHEETS
 # =========================
@@ -106,6 +126,9 @@ def now_arg() -> datetime:
 
 def hhmm_arg() -> str:
     return now_arg().strftime("%H:%M")
+
+def generate_trade_id(ticker):
+    return f"{ticker}_{int(time.time())}_{random.randint(100,999)}"
 
 def in_allowed_window() -> bool:
     if not USE_TIME_WINDOW:
