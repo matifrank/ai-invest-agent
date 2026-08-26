@@ -1,3 +1,0 @@
-trade_id,date,ticker,action,quantity,price,currency,notes
-T-20260826-001,2026-08-26,AAPL,BUY,10,150,USD,Initial tactical entry for earnings setup
-T-20260801-002,2026-08-01,YPFD,BUY,200,1800,ARS,Rebalance to core dividend position
