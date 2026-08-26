@@ -1,0 +1,3 @@
+ticker,bucket,strategy,entry_date,quantity,avg_cost,last_price,notes
+AAPL,TACTICAL,swing,2026-08-15,10,150,150,Event-driven swing around earnings
+TSLA,TACTICAL,conviction,2026-07-01,2,700,700,Longer-term conviction trade

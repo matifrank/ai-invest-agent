@@ -1,0 +1,5 @@
+ticker,tipo,cantidad,ppc,last_price,ratio,bucket,strategy
+AAPL,CEDEAR,10,150,150,0.01,TACTICAL,swing
+YPFD,CEDEAR,200,1800,1800,0.10,CORE,dividend
+TSLA,US,2,700,700,0.02,CONVICTION,conviction
+GGAL,CEDEAR,50,850,850,0.05,RESERVE,liquidity
