@@ -2,11 +2,11 @@ import os
 from datetime import date
 from typing import Dict, Any, List, Optional
 
-from src.common.sheets import connect_sheets, ensure_worksheet
+from src.common.sheets import connect_sheets, ensure_worksheet, get_all_records
 from src.common.telegram import send_telegram
-from src.common.iol import IOLClient
-from src.common.portfolio_state import compute_portfolio_state
-from src.common.pricing import get_ars_price, get_usd_price
+from src.common.iol import IOLClient, parse_iol_quote, get_last_price
+from src.common.yahoo import stock_usd_price
+from src.common.calc import ccl_implicit
 
 SPREADSHEET_NAME = "ai-portfolio-agent"
 PORTFOLIO_SHEET = "portfolio"
@@ -81,7 +81,74 @@ def main(dry_run: bool = True, send_report: bool = True):
     if os.environ.get("IOL_USERNAME") and os.environ.get("IOL_PASSWORD"):
         iol = IOLClient(os.environ["IOL_USERNAME"], os.environ["IOL_PASSWORD"])
 
-    total_usd, tactical_usd, details, skipped = compute_portfolio_state(sheet, iol=iol)
+    portfolio = get_all_records(sheet, PORTFOLIO_SHEET)
+
+    total_usd = 0.0
+    tactical_usd = 0.0
+    details: Dict[str, Dict[str, Any]] = {}
+    skipped: Dict[str, str] = {}
+
+    for p in portfolio:
+        ticker = (p.get("ticker") or "").strip()
+        if not ticker:
+            continue
+        qty = safe_float(p.get("cantidad") or p.get("qty") or 0) or 0.0
+        ppc = safe_float(p.get("ppc") or p.get("price_paid") or 0) or 0.0
+        ratio = safe_float(p.get("ratio") or 1.0) or 1.0
+
+        # Prefer last_price column in portfolio as ARS price if present
+        last_ars = None
+        lp = p.get("last_price") or p.get("last_ars") or p.get("lastprice")
+        if lp:
+            last_ars = safe_float(lp)
+
+        # If not provided, fetch from IOL when available
+        if last_ars is None and iol:
+            try:
+                last_ars = get_last_price(iol, "bcba", ticker)
+            except Exception:
+                last_ars = None
+
+        stock_usd = stock_usd_price(ticker)
+        if stock_usd is None:
+            skipped[ticker] = "no stock_usd found"
+            continue
+
+        if last_ars is None:
+            skipped[ticker] = "no last ARS price (no last_price column and IOL not available)"
+            continue
+
+        ccl_impl = ccl_implicit(last_ars, stock_usd, ratio)
+        if not ccl_impl:
+            skipped[ticker] = "could not compute ccl_impl"
+            continue
+
+        usd_val = qty * last_ars / ccl_impl if ccl_impl else 0.0
+        pnl = qty * ((last_ars - ppc) / ccl_impl) if ccl_impl else 0.0
+
+        # classification: tactical if present in tactical_positions OR if a 'tag' column explicitly marks it
+        classification = "CORE"
+        if ticker in tactical_set:
+            classification = "TACTICAL"
+        else:
+            tag = (p.get("tag") or p.get("strategy") or "").strip().upper()
+            if tag in ("TACTICAL", "T", "TACTIC"):
+                classification = "TACTICAL"
+
+        total_usd += usd_val
+        if classification == "TACTICAL":
+            tactical_usd += usd_val
+
+        details[ticker] = {
+            "qty": qty,
+            "ppc": ppc,
+            "last_ars": last_ars,
+            "stock_usd": stock_usd,
+            "ccl_impl": ccl_impl,
+            "usd_val": usd_val,
+            "pnl": pnl,
+            "classification": classification,
+        }
 
     # target tactical USD and delta
     target_tactical_usd = tactical_target_pct * total_usd
