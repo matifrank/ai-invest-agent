@@ -379,7 +379,6 @@ El Intraday Watchlist utiliza parte de la misma infraestructura, pero debe perma
 # Portabilidad / Multi-user
 
 Un objetivo importante es que en el futuro otra persona pueda utilizar este proyecto.
-
 No quiero parámetros personales hardcodeados dentro del código.
 
 Quiero estudiar una capa de configuración similar a:
@@ -404,7 +403,6 @@ cash_target_pct
 
 trade_target_usd
 max_trade_usd
-
 watchlist_enabled
 tactical_pulse_enabled
 monthly_review_enabled
@@ -439,7 +437,6 @@ Analizá si hacen falta hojas/tablas como:
 agent_config
 portfolio
 movements
-allocation
 watchlist
 opportunities
 pending_trades
@@ -521,7 +518,6 @@ Trigger:
 manual `workflow_dispatch`.
 
 ### tactical_pulse.yml
-
 Frecuencia:
 2 veces por semana.
 
@@ -594,7 +590,6 @@ Tactical X%
 Cash X%
 
 Tactical contribution this month:
-USD X
 
 Suggested actions:
 ...
@@ -612,8 +607,80 @@ Evaluá extraer componentes reutilizables.
 
 Ejemplo conceptual:
 
-```text
 src/
+***
+README: ai-invest-agent — Four-Bucket Wealth Tracker & Tactical Engine
+***
+
+Resumen
+-------
+Este repositorio mantiene las capacidades existentes (watchlist intradía, executor, portfolio daily) e introduce una arquitectura orientada a 4 buckets: `RESERVE`, `CORE`, `CONVICTION`, `TACTICAL`.
+
+Objetivos clave
+- Separar intención (bucket) de tipo de instrumento (`tipo`).
+- Mantener el Watchlist intradía independiente.
+- Implementar un `Tactical Pulse` operativo (dry-run) y un `Monthly Wealth Review` patrimonial.
+- Centralizar precios y estado de portfolio en `src/common/pricing.py` y `src/common/portfolio_state.py`.
+
+Quick start
+-----------
+1. Agregar Secrets en GitHub: `PORTFOLIO_GS_CREDS`, `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`. Opcional: `IOL_USERNAME`, `IOL_PASSWORD`.
+2. Ejecutar workflow `Tactical Pulse Dry-Run` en Actions o localmente:
+
+```powershell
+python -m src.scripts.setup_agent_config
+python -m src.scripts.setup_example_sheets
+python -m src.jobs.tactical_pulse_job
+```
+
+Sheets (hojas) mínimas
+----------------------
+- `agent_config` — key, value, description (configuración de objetivos y sweep).
+- `portfolio` — conservar `tipo` (compatibilidad diaria). Añadir `bucket`/`strategy` para intención:
+  `ticker,tipo,cantidad,ppc,last_price,ratio,bucket,strategy`
+- `trading_journal` — registro de trades y ejecuciones.
+- `tactical_positions` — snapshot de positions tácticas.
+- `prices_daily` — precios diarios para fallback/manual overrides.
+- `pending_trades`, `portfolio_history_v2`, `watchlist_history_v2` — existentes.
+
+Data model mínimo por posición
+-----------------------------
+```
+ticker,name,instrument_type,bucket,quantity,avg_cost,current_price,market_value_usd,portfolio_weight,bucket_weight,target_weight,max_weight,realized_pnl,unrealized_pnl,thesis,thesis_status,entry_date,expected_horizon
+```
+
+Behavior & rules
+----------------
+- `bucket` expresa intención (RESERVE/CORE/CONVICTION/TACTICAL). No sobrescribir `tipo`.
+- Tactical → Core sweep: configurable (por defecto 50% de ganancias realizadas → Core).
+- Pricing priority: `portfolio.last_price` override -> `prices_daily` -> IOL -> Yahoo USD.
+
+Roadmap (incremental)
+----------------------
+Phase 1 — Foundation: `pricing.py`, `portfolio_state.py` (implementado).
+Phase 2 — Tactical engine: improve tactical metrics, sweep suggestions (scaffold present).
+Phase 3 — Conviction engine & allocation rules.
+Phase 4 — Monthly wealth review and snapshots.
+Phase 5 — Tests, CI, docs, migration scripts.
+
+Notes
+-----
+- Todas las recomendaciones son sugerencias: no ejecutar movimientos automáticamente.
+- Preserve audit trail: append actions/recommendations to `trading_journal`.
+
+Si querés, actualizo este README con ejemplos CSV para copiar/pegar en Sheets (agent_config, portfolio, trading_journal, tactical_positions). Hago eso ahora si confirmás.
+Si querés, actualizo este README con ejemplos CSV para copiar/pegar en Sheets (agent_config, portfolio, trading_journal, tactical_positions). Hago eso ahora si confirmás.
+
+Example CSVs
+------------
+He incluido ejemplos listos para copiar/pegar en `Google Sheets` dentro de `docs/examples/`:
+
+- [agent_config_example.csv](docs/examples/agent_config_example.csv)
+- [portfolio_example.csv](docs/examples/portfolio_example.csv)
+- [trading_journal_example.csv](docs/examples/trading_journal_example.csv)
+- [tactical_positions_example.csv](docs/examples/tactical_positions_example.csv)
+
+Copialos directamente en tus hojas o súbelos como referencia para backfill.
     clients/
         iol_client.py
         sheets_client.py
