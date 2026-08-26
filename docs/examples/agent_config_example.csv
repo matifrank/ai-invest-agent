@@ -1,5 +1,0 @@
-key,value,description
-tactical_target_pct,0.10,Target proportion of total portfolio for Tactical sleeve (0-1)
-tactical_sweep_pct,0.50,Portion of tactical profits suggested to transfer to Core when excess exists (0-1)
-currency_base,USD,Base reporting currency for portfolio aggregation
-prices_source,IOL|YAHOO,Preferred price sources in priority order
