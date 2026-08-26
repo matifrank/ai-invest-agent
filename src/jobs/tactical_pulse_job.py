@@ -34,10 +34,6 @@ def safe_float(x) -> Optional[float]:
             return None
         if isinstance(x, str) and x.strip() == "":
             return None
-        # normalize numbers like "8,155.00" -> "8155.00"
-        if isinstance(x, str):
-            s = x.replace("$", "").replace(",", "").strip()
-            return float(s)
         return float(x)
     except Exception:
         return None
@@ -66,17 +62,6 @@ def main(dry_run: bool = True, send_report: bool = True):
     cfg = read_agent_config(sheet)
     tactical_target_pct = safe_float(cfg.get("tactical_target_pct") or 0.10) or 0.10
 
-    # read tactical_positions to determine which tickers are tactical
-    tactical_set = set()
-    try:
-        tactical_rows = get_all_records(sheet, "tactical_positions")
-        for r in tactical_rows:
-            t = (r.get("ticker") or "").strip()
-            if t:
-                tactical_set.add(t)
-    except Exception:
-        tactical_set = set()
-
     iol = None
     if os.environ.get("IOL_USERNAME") and os.environ.get("IOL_PASSWORD"):
         iol = IOLClient(os.environ["IOL_USERNAME"], os.environ["IOL_PASSWORD"])
@@ -86,7 +71,6 @@ def main(dry_run: bool = True, send_report: bool = True):
     total_usd = 0.0
     tactical_usd = 0.0
     details: Dict[str, Dict[str, Any]] = {}
-    skipped: Dict[str, str] = {}
 
     for p in portfolio:
         ticker = (p.get("ticker") or "").strip()
@@ -96,45 +80,34 @@ def main(dry_run: bool = True, send_report: bool = True):
         ppc = safe_float(p.get("ppc") or p.get("price_paid") or 0) or 0.0
         ratio = safe_float(p.get("ratio") or 1.0) or 1.0
 
-        # Prefer last_price column in portfolio as ARS price if present
+        # Determine current ARS price via IOL then fallback
         last_ars = None
-        lp = p.get("last_price") or p.get("last_ars") or p.get("lastprice")
-        if lp:
-            last_ars = safe_float(lp)
-
-        # If not provided, fetch from IOL when available
-        if last_ars is None and iol:
+        if iol:
             try:
                 last_ars = get_last_price(iol, "bcba", ticker)
             except Exception:
                 last_ars = None
 
+        if last_ars is None:
+            # try to parse from other sources or skip
+            last_ars = None
+
         stock_usd = stock_usd_price(ticker)
         if stock_usd is None:
-            skipped[ticker] = "no stock_usd found"
             continue
 
         if last_ars is None:
-            skipped[ticker] = "no last ARS price (no last_price column and IOL not available)"
+            # can't compute ccl, skip
             continue
 
         ccl_impl = ccl_implicit(last_ars, stock_usd, ratio)
         if not ccl_impl:
-            skipped[ticker] = "could not compute ccl_impl"
             continue
 
         usd_val = qty * last_ars / ccl_impl if ccl_impl else 0.0
-        pnl = qty * ((last_ars - ppc) / ccl_impl) if ccl_impl else 0.0
+        pnl = qty * ( (last_ars - ppc) / ccl_impl ) if ccl_impl else 0.0
 
-        # classification: tactical if present in tactical_positions OR if a 'tag' column explicitly marks it
-        classification = "CORE"
-        if ticker in tactical_set:
-            classification = "TACTICAL"
-        else:
-            tag = (p.get("tag") or p.get("strategy") or "").strip().upper()
-            if tag in ("TACTICAL", "T", "TACTIC"):
-                classification = "TACTICAL"
-
+        classification = classify_portfolio_row(p)
         total_usd += usd_val
         if classification == "TACTICAL":
             tactical_usd += usd_val
@@ -176,10 +149,6 @@ def main(dry_run: bool = True, send_report: bool = True):
     report = header + body
 
     print(report)
-    if skipped:
-        print("\nSkipped tickers and reasons:")
-        for t, reason in skipped.items():
-            print(f"- {t}: {reason}")
     if send_report and send_telegram and dry_run:
         try:
             send_telegram(report)
