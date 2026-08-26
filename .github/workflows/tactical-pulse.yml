@@ -31,12 +31,6 @@ jobs:
         run: |
           python -m src.scripts.setup_agent_config
 
-      - name: Run setup_example_sheets (create example journal & tactical positions)
-        env:
-          PORTFOLIO_GS_CREDS: ${{ secrets.PORTFOLIO_GS_CREDS }}
-        run: |
-          python -m src.scripts.setup_example_sheets
-
       - name: Run tactical pulse dry-run
         env:
           PORTFOLIO_GS_CREDS: ${{ secrets.PORTFOLIO_GS_CREDS }}
